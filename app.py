@@ -26,15 +26,50 @@ def load_json(blob_path: str):
     cc = make_bsc().get_container_client(CONTAINER)
     return json.loads(cc.download_blob(blob_path).readall())
 
-st.title("Hello World + Blob JSON")
+st.title("JSON → Table demo")
 
-# This must be the exact path inside the container, e.g.
-# processed/software_engineer_ii/AB123/clean.json
-blob_name = "athena/Hamelburg Supervisory Hiring_athena.json"  # <-- change me
+# Pick a blob (you can hardcode or list via list_blobs)
+blob_path = st.text_input("Blob path inside the container", "athena/Hamelburg Supervisory Hiring_athena.json")
 
-try:
-    data = load_json(blob_name)
-    st.subheader(f"Raw JSON from Blob: {blob_name}")
-    st.json(data)
-except Exception as e:
-    st.error(f"Error loading '{blob_name}': {e}")
+if st.button("Load"):
+    try:
+        data = load_json(blob_path)
+
+        st.markdown("#### Raw JSON preview")
+        st.json(data)
+
+        # --- Flexible conversion rules ---
+        df = None
+        if isinstance(data, list):
+            # JSON is a list of records
+            df = pd.DataFrame(data)
+
+        elif isinstance(data, dict):
+            # 1) common case: records live under a key (e.g., "measures")
+            if "measures" in data and isinstance(data["measures"], list):
+                df = pd.DataFrame(data["measures"])
+            else:
+                # 2) try flattening nested dicts/lists generically
+                df = pd.json_normalize(
+                    data,
+                    max_level=1,                # bump this if you need deeper flattening
+                    sep="."
+                )
+
+        if df is not None and not df.empty:
+            st.markdown("#### Table view")
+            st.dataframe(df, use_container_width=True)
+
+            # Optional: allow CSV download (no Function App needed)
+            csv = df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "Download as CSV",
+                data=csv,
+                file_name=f"{blob_path.split('/')[-1].rsplit('.',1)[0]}.csv",
+                mime="text/csv",
+            )
+        else:
+            st.info("Loaded JSON but couldn't form a table. You may need a custom flattening rule.")
+
+    except Exception as e:
+        st.error(f"Failed to load/parse: {e}")
