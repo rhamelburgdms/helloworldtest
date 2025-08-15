@@ -30,7 +30,7 @@ st.title("Hello World + Blob JSON")
 
 # This must be the exact path inside the container, e.g.
 # processed/software_engineer_ii/AB123/clean.json
-blob_name = "processed/athena/Hamelburg Supervisory Hiring_athena.json"  # <-- change me
+blob_name = "athena/Hamelburg Supervisory Hiring_athena.json"  # <-- change me
 
 try:
     data = load_json(blob_name)
