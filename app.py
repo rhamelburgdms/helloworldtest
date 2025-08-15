@@ -4,7 +4,7 @@ import os, json
 import streamlit as st
 from azure.storage.blob import BlobServiceClient
 from azure.identity import DefaultAzureCredential
-
+import pandas as pd
 CONTAINER = os.getenv("CONTAINER", "processed")
 
 def make_bsc() -> BlobServiceClient:
