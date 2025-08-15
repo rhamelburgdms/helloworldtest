@@ -2,3 +2,4 @@ streamlit
 azure-storage-blob
 azure-identity
 python-dotenv
+pandas
