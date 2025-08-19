@@ -1,38 +1,19 @@
-# app.py — minimal Blob -> Streamlit JSON viewer
-
-import os, json
+import os
+import io
+import pandas as pd
 import streamlit as st
 from azure.storage.blob import BlobServiceClient
 from azure.identity import DefaultAzureCredential
-import pandas as pd
 
-'''
-st.title("Expandable Buttons Demo")
-
-with st.expander("Show Details for Candidate A"):
-    st.write("Name: Alice Johnson")
-    st.write("Role: Data Scientist")
-    st.write("Status: Shortlisted")
-
-with st.expander("Show Details for Candidate B"):
-    st.write("Name: Bob Smith")
-    st.write("Role: Product Manager")
-    st.write("Status: Pending Review")
-
-with st.expander("Advanced Settings"):
-    st.write("Here you can configure additional options.")
-    option = st.checkbox("Enable debug mode")
-    st.write("Debug mode:", option)
-
-'''
-CONTAINER = os.getenv("CONTAINER", "processed")
+# ---- Config ----
+CONTAINER = os.getenv("CONTAINER", "dashboard")
 
 def make_bsc() -> BlobServiceClient:
-    # Local dev: use connection string (set in your .env)
+    # Local: connection string
     conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
     if conn_str:
         return BlobServiceClient.from_connection_string(conn_str)
-    # Deployed on Azure: use Managed Identity + account name from App Settings
+    # Azure: Managed Identity + account name
     acct = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
     if not acct:
         raise RuntimeError(
@@ -42,55 +23,54 @@ def make_bsc() -> BlobServiceClient:
     cred = DefaultAzureCredential(exclude_shared_token_cache_credential=True)
     return BlobServiceClient(account_url=f"https://{acct}.blob.core.windows.net", credential=cred)
 
-def load_json(blob_path: str):
+def load_csv(blob_path: str, *, encoding="utf-8", delimiter=None) -> pd.DataFrame:
+    """
+    Download a CSV blob and return a DataFrame.
+    - `encoding`: try 'utf-8' (or 'utf-8-sig' if you see BOM issues)
+    - `delimiter`: set to ',' ';' '\t' etc. If None, pandas will infer.
+    """
     cc = make_bsc().get_container_client(CONTAINER)
-    return json.loads(cc.download_blob(blob_path).readall())
+    blob_bytes = cc.download_blob(blob_path).readall()
 
-st.title("JSON → Table demo")
+    # Use StringIO for text CSV
+    text_buf = io.StringIO(blob_bytes.decode(encoding, errors="replace"))
+    read_kwargs = {}
+    if delimiter:
+        read_kwargs["sep"] = delimiter
 
-# Pick a blob (you can hardcode or list via list_blobs)
-blob_path = st.text_input("Blob path inside the container", "athena/Hamelburg Supervisory Hiring_athena.json")
+    # If you have large CSVs, you can add engine="pyarrow" (requires pyarrow)
+    # read_kwargs["engine"] = "pyarrow"
+    return pd.read_csv(text_buf, **read_kwargs)
 
-if st.button("Load"):
+# ------------------- Streamlit UI -------------------
+st.title("Blob CSV → Table")
+
+# Example: "athena/Hamelburg Supervisory Hiring_athena.csv"
+blob_path = st.text_input("CSV blob path inside the container", "athena/sample.csv")
+
+# Optional controls
+col1, col2 = st.columns(2)
+with col1:
+    encoding = st.text_input("Encoding", value="utf-8")
+with col2:
+    delimiter = st.text_input("Delimiter (blank = auto)", value="")
+
+if st.button("Load CSV"):
     try:
-        data = load_json(blob_path)
-
-        st.markdown("#### Raw JSON preview")
-        st.json(data)
-
-        # --- Flexible conversion rules ---
-        df = None
-        if isinstance(data, list):
-            # JSON is a list of records
-            df = pd.DataFrame(data)
-
-        elif isinstance(data, dict):
-            # 1) common case: records live under a key (e.g., "measures")
-            if "measures" in data and isinstance(data["measures"], list):
-                df = pd.DataFrame(data["measures"])
-            else:
-                # 2) try flattening nested dicts/lists generically
-                df = pd.json_normalize(
-                    data,
-                    max_level=1,                # bump this if you need deeper flattening
-                    sep="."
-                )
+        df = load_csv(blob_path, encoding=encoding, delimiter=(delimiter or None))
 
         if df is not None and not df.empty:
             st.markdown("#### Table view")
             st.dataframe(df, use_container_width=True)
 
-            # Optional: allow CSV download (no Function App needed)
             csv = df.to_csv(index=False).encode("utf-8")
             st.download_button(
                 "Download as CSV",
                 data=csv,
-                file_name=f"{blob_path.split('/')[-1].rsplit('.',1)[0]}.csv",
+                file_name=os.path.basename(blob_path),
                 mime="text/csv",
             )
         else:
-            st.info("Loaded JSON but couldn't form a table. You may need a custom flattening rule.")
-
+            st.info("Loaded CSV but the DataFrame is empty.")
     except Exception as e:
-        st.error(f"Failed to load/parse: {e}")
-
+        st.error(f"Failed to load CSV: {e}")
