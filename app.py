@@ -6,7 +6,7 @@ from azure.storage.blob import BlobServiceClient
 from azure.identity import DefaultAzureCredential
 import pandas as pd
 
-
+'''
 st.title("Expandable Buttons Demo")
 
 with st.expander("Show Details for Candidate A"):
@@ -93,4 +93,4 @@ if st.button("Load"):
 
     except Exception as e:
         st.error(f"Failed to load/parse: {e}")
-'''
+
