@@ -5,6 +5,26 @@ import streamlit as st
 from azure.storage.blob import BlobServiceClient
 from azure.identity import DefaultAzureCredential
 import pandas as pd
+
+
+st.title("Expandable Buttons Demo")
+
+with st.expander("Show Details for Candidate A"):
+    st.write("Name: Alice Johnson")
+    st.write("Role: Data Scientist")
+    st.write("Status: Shortlisted")
+
+with st.expander("Show Details for Candidate B"):
+    st.write("Name: Bob Smith")
+    st.write("Role: Product Manager")
+    st.write("Status: Pending Review")
+
+with st.expander("Advanced Settings"):
+    st.write("Here you can configure additional options.")
+    option = st.checkbox("Enable debug mode")
+    st.write("Debug mode:", option)
+
+'''
 CONTAINER = os.getenv("CONTAINER", "processed")
 
 def make_bsc() -> BlobServiceClient:
@@ -73,3 +93,4 @@ if st.button("Load"):
 
     except Exception as e:
         st.error(f"Failed to load/parse: {e}")
+'''
