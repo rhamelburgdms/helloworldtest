@@ -7,7 +7,7 @@ from azure.identity import DefaultAzureCredential
 import numpy as np
 import re, json
 st.set_page_config(page_title="Candidates", page_icon="🧩", layout="wide")
-
+ 
 pages = {
     "Your account": [
         st.Page("candidates.py", title="View candidates"),
