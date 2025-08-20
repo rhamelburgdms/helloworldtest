@@ -72,6 +72,19 @@ def load_csv(blob_path: str) -> pd.DataFrame | None:
         return pd.read_csv(io.StringIO(blob_bytes.decode("utf-8")))
     except Exception:
         return None
+        
+def load_summary(cand: str) -> str | None:
+    """
+    Downloads summary.txt for a given candidate from the processed container.
+    Returns the summary text, or None if not found.
+    """
+    cc = make_bsc().get_container_client(CONTAINER)
+    path = f"{cand}/summary.txt"
+    try:
+        blob_bytes = cc.download_blob(path).readall()
+        return blob_bytes.decode("utf-8", errors="replace")
+    except Exception:
+        return None
 
 # actual UI
 st.title("Candidates")
@@ -94,6 +107,13 @@ if not candidates:
 else:
     for cand in candidates:
         with st.expander(cand, expanded=False):
+            summary = load_summary(cand)
+            if summary:
+                st.markdown("### Candidate Summary")
+                st.write(summary)
+            else:
+                st.info("_No summary available for this candidate._")
+
             # list the csvs for that candidate
             
             try:
@@ -103,7 +123,7 @@ else:
                     df = load_csv(path)
                     if df is not None:
                         st.markdown(f"**{path.split('/')[-1]}**")
-                        #st.dataframe(df, use_container_width=True)
+                        st.dataframe(df, use_container_width=True)
                     else:
                         st.warning(f"Failed to load `{path}`.")
 
@@ -157,7 +177,7 @@ else:
                     return 0.0, set(), set(), set()
 
                 tp_col = _col(df, "Top Performers")
-                cf_col = _col(df, "Candidate Flags")
+                cf_col = _col(df, "Candidate Value")
                 if not tp_col or not cf_col:
                     return 0.0, set(), set(), set()
 
