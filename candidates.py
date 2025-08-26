@@ -5,7 +5,7 @@ import html as _html
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from azure.identity import DefaultAzureCredential
 #from config import make_bsc, _download_blob_bytes
-from agent_comparer import compare_summaries_agent
+#from agent_comparer import compare_summaries_agent
 st.set_page_config(page_title="Candidates", page_icon="🧩", layout="wide")
 from send_back import render_candidate_download
 
