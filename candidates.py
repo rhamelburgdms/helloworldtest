@@ -1,14 +1,15 @@
 import os, io, re, json
 import pandas as pd
 import streamlit as st
+import html as _html
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from azure.identity import DefaultAzureCredential
-
+#from config import make_bsc, _download_blob_bytes
+from agent_comparer import compare_summaries_agent
 st.set_page_config(page_title="Candidates", page_icon="🧩", layout="wide")
+from send_back import render_candidate_download
 
-
-CONTAINER = os.getenv("CONTAINER", "dashboard")   # everything comes from 'dashboard'
-CSV_EXTS = {".csv"}
+CONTAINER = os.getenv("CONTAINER", "dashboard")
 
 @st.cache_resource
 def make_bsc() -> BlobServiceClient:
@@ -21,34 +22,34 @@ def make_bsc() -> BlobServiceClient:
 
 def get_cc():
     return make_bsc().get_container_client(CONTAINER)
-
+    
 def _download_blob_bytes(path: str) -> bytes | None:
     try:
         return get_cc().download_blob(path).readall()
     except Exception:
         return None
 
+#CONTAINER = os.getenv('CONTAINER', 'dashboard')
+# We define a get client function 
+def get_cc():
+    return make_bsc().get_container_client(CONTAINER)
+# We cache candidate data for 30 seconds so if anything changes in that 30 seconds it gets updated
 @st.cache_data(ttl=30)
-def list_candidate_prefixes() -> list[str]:
-    """Top-level prefixes inside the dashboard container."""
-    cc = get_cc()
-    prefixes = set()
-    try:
-        for item in cc.walk_blobs(delimiter="/"):
-            if hasattr(item, "name") and item.name:
-                p = item.name.strip("/")
-                if p:
-                    prefixes.add(p)
-    except TypeError:
-        for blob in cc.list_blobs():
-            parts = blob.name.split("/", 1)
-            if len(parts) == 2:
-                prefixes.add(parts[0])
+def list_candidate_prefixes() -> list[str]: # A list of strings 
+    cc = get_cc() # Grab the container client
+    prefixes = set() # Store prefixes in an empty set, because "prefixes" are the file names
+    for item in cc.walk_blobs(delimiter="/"): # Pulling names from the folders
+        if hasattr(item, "name") and item.name:
+            p = item.name.strip("/")
+            if p:
+                prefixes.add(p)
+                
     return sorted(prefixes)
-
+    
+# Cache data for 30 seconds
 @st.cache_data(ttl=30)
 def list_csvs_for_candidate(cand: str) -> list[str]:
-    """List CSV blob paths under dashboard/{cand}/"""
+    # We grab the csv paths so that we can load the csvs
     cc = get_cc()
     start = cand.rstrip("/") + "/"
     paths = []
@@ -56,7 +57,8 @@ def list_csvs_for_candidate(cand: str) -> list[str]:
         if blob.name.lower().endswith(".csv"):
             paths.append(blob.name)
     return sorted(paths)
-
+    
+# We load the csvs so that we can display them in streamlit 
 def load_csv(blob_path: str) -> pd.DataFrame | None:
     try:
         b = _download_blob_bytes(blob_path)
@@ -65,11 +67,15 @@ def load_csv(blob_path: str) -> pd.DataFrame | None:
         return pd.read_csv(io.StringIO(b.decode("utf-8")))
     except Exception:
         return None
-
+        
 def load_summary(cand: str) -> str:
     """Read dashboard/{cand}/summary.txt → str ('' if missing)."""
-    b = _download_blob_bytes(f"{cand}/summary.txt")
-    return b.decode("utf-8", errors="replace") if b is not None else ""
+    try:
+        data = get_cc().download_blob(f"{cand.rstrip('/')}/summary.txt").readall()
+        return data.decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
 
 def save_summary(cand: str, text: str):
     """Write dashboard/{cand}/summary.txt with text/plain content type."""
@@ -79,17 +85,17 @@ def save_summary(cand: str, text: str):
         overwrite=True,
         content_settings=ContentSettings(content_type="text/plain"),
     )
+      
+@st.cache_data(show_spinner=True)
+def list_candidates_from_dashboard(_bsc: BlobServiceClient, container: str) -> list[str]:
+    cc = _bsc.get_container_client(container)  # use the param you passed in
+    return sorted({b.name.split("/", 1)[0] for b in cc.walk_blobs(name_starts_with="", delimiter="/")})
 
+bsc = make_bsc()
+dash = os.getenv("CONTAINER", "dashboard")  # use uppercase key consistently
+all_candidates = list_candidates_from_dashboard(bsc, dash)
 
-def _df_to_markdown(df: pd.DataFrame) -> str:
-    """Prefer a real Markdown table; fallback to code block if tabulate isn't installed."""
-    try:
-        # requires 'tabulate' to be installed for pretty MD tables
-        return df.to_markdown(index=False)
-    except Exception:
-        # readable monospaced fallback
-        return "```\n" + df.to_string(index=False) + "\n```"
-
+# Here's where we build the download piece that makes it easy to paste into an email.
 def build_candidate_email_table(cand: str, use_edits: bool, edited_summary: str) -> str:
     # Load CSVs for the candidate
     csvs = list_csvs_for_candidate(cand)
@@ -98,7 +104,6 @@ def build_candidate_email_table(cand: str, use_edits: bool, edited_summary: str)
 
     athena_df = load_csv(athena_path) if athena_path else None
     genos_df = load_csv(genos_path) if genos_path else None
-
     # Start HTML email structure
     html = f"""
     <html>
@@ -107,7 +112,7 @@ def build_candidate_email_table(cand: str, use_edits: bool, edited_summary: str)
         <p>{edited_summary if use_edits else load_summary(cand)}</p>
     """
 
-    # Add Athena table if available
+    # add athena table if athena table is available
     if athena_df is not None and not athena_df.empty:
         html += "<h3>Athena vs Top Performers</h3>"
         html += athena_df.to_html(
@@ -118,7 +123,7 @@ def build_candidate_email_table(cand: str, use_edits: bool, edited_summary: str)
             escape=False
         )
 
-    # Add Genos table if available
+    # add genos if it is available
     if genos_df is not None and not genos_df.empty:
         html += "<h3>Genos Emotional Intelligence Scores</h3>"
         html += genos_df.to_html(
@@ -139,60 +144,177 @@ def build_candidate_email_table(cand: str, use_edits: bool, edited_summary: str)
 
     return html
 
-
 st.title("Candidates")
 st.caption("Each candidate is a folder under the 'dashboard' container. Expand to view data and edit the summary.")
+# session bootstrap
+if "candidates" not in st.session_state:
+    st.session_state["candidates"] = list_candidate_prefixes()  # seed UI list
+
+# Track which expander should remain open across reruns
+if "open_cand" not in st.session_state:
+    st.session_state["open_cand"] = None
 
 # List candidates
-try:
-    candidates = list_candidate_prefixes()
-except Exception as e:
-    st.error(f"Failed to list candidates: {e}")
-    candidates = []
+candidates = list_candidate_prefixes()
+
+if "candidates" not in st.session_state:
+    st.session_state.candidates = list_candidate_prefixes()
+candidates = st.session_state.candidates
 
 if not candidates:
     st.info("No candidates are pending approval.")
 else:
     for cand in candidates:
         with st.expander(cand, expanded=False):
-            # --- Inline summary editor ---
-            st.subheader("Candidate Summary", anchor=False)
-            current_summary = load_summary(cand)
-            edited_summary = st.text_area(
-                f"Edit Summary – {cand}",
-                value=current_summary,
-                height=220,
-                key=f"summary-editor-{cand}",
-                placeholder="No summary yet for this candidate."
+            # mode switching (need to add functionality to write summaries differently)
+            mode = st.radio(
+                "View mode",
+                options=["Solo view", "Compare"],
+                index=0,
+                horizontal=True,
+                key=f"mode-{cand}",
             )
+            
+            if mode == "Solo view":
+                current_summary = load_summary(cand) or ""
+            
+                edited_summary = st.text_area(
+                    label=f"Edit Summary – {cand}",
+                    value=current_summary,
+                    height=260,
+                    key=f"solo-ta-{cand}",
+                )
+            
+                # Save edits into session state for later email/download use
+                st.session_state[f"edited_summary_{cand}"] = edited_summary
+                
+                # Build HTML for email/download including edits
+        
+                solo_html = f"""
+                <html>
+                <body style="font-family: Arial, sans-serif; font-size: 14px; color: #222;">
+                    <h2>Candidate Summary – {cand}</h2>
+                    <pre style="white-space: pre-wrap; line-height:1.4;">{_html.escape(edited_summary or "")}</pre>
+                    <p style="margin-top:20px; font-style:italic;">Exported from HR Dashboard</p>
+                </body>
+                </html>
+                """.strip()
+            
+                st.session_state[f"email_html_solo_{cand}"] = solo_html
+                try:
+                    csvs = list_csvs_for_candidate(cand)
+                except Exception as e:
+                    st.error(f"Failed to list CSVs for {cand}: {e}")
+                    csvs = []
+                
+                athena_path = next((p for p in csvs if re.search(r"(athena|athen[_-]?vs[_-]?top)", p, re.I)), None)
+                genos_path = next((p for p in csvs if "genos" in p.lower()), None)
 
-            cols = st.columns([1, 1, 2, 6])   # Save / Revert / Download MD / spacer
-            with cols[0]:
-                if st.button("Save Summary", key=f"save-summary-{cand}"):
-                    try:
-                        save_summary(cand, edited_summary)
-                        st.success("Summary saved to dashboard container.")
-                    except Exception as e:
-                        st.error(f"Failed to save summary: {e}")
-
-
-            with cols[2]:
-                use_edits = st.checkbox("Use current edits", value=True, key=f"use-edits-{cand}")
-                email_html = build_candidate_email_table(cand, use_edits, edited_summary)
-                st.download_button(
-                    "📄 Download Email-Ready Summary",
-                    data=email_html,
+                athena_df = load_csv(athena_path) if athena_path else None
+                genos_df  = load_csv(genos_path)  if genos_path  else None
+                
+                if (athena_df is None or athena_df.empty) and (genos_df is None or genos_df.empty):
+                    st.info("No Athena or Genos tables found for this candidate.")
+                else:
+                    if athena_df is not None and not athena_df.empty:
+                        st.subheader("Athena vs Top Performers", anchor=False)
+                        st.dataframe(athena_df, use_container_width=True)
+                
+                    if genos_df is not None and not genos_df.empty:
+                        st.subheader("Genos Emotional Intelligence Scores", anchor=False)
+                        st.dataframe(genos_df, use_container_width=True)
+                # After you compute edited_summary (inside Solo view):
+                full_html = build_candidate_email_table(
+                    cand=cand,
+                    use_edits=True,
+                    edited_summary=edited_summary
+                )
+                
+                clicked = st.download_button(
+                    "📄 Download Summary (HTML) and remove candidate from bank",
+                    data=full_html.encode("utf-8"),
                     file_name=f"{cand}_summary.html",
                     mime="text/html",
-                    key=f"dltxt-{cand}",
-                    help="Download a ready-to-paste HTML summary with tables and borders."
+                    key=f"dl-solo-html-{cand}"
                 )
+                if clicked:
+                    render_candidate_download(cand, full_html)  # archive the full HTML (with tables)
+                
+                st.divider()
+            
+            else:
 
+                import compare as cmp
+            
+                # Let user pick who to compare against
+                options = [c for c in all_candidates if c != cand]
+                others = st.multiselect(
+                    "Compare with...",
+                    options=options,
+                    default=[],
+                    max_selections=3,
+                    key=f"cmp-multi-{cand}",
+                    help="Pick up to 3 candidates to compare.",
+                )
+            
+                compare_mode = len(others) > 0
+            
+                if not compare_mode:
+                    st.info("Select at least one other candidate to compare.")
+                else:
+                    st.info("Compare mode is active. The single-candidate editor is hidden.")
+            
+                    # Selected candidates
+                    selected = [cand] + others
+            
+                    # Build + render comparison table
+                    df = cmp.build_comparison_table(selected)
+                    cmp.render_comparison_table(selected, title=f"{cand} vs selected candidates")
+            
+                    # Provide a combined editor for the first selected "other"
+                    other = others[0]
+                    with st.expander(f"📝 Edit combined summary: {cand} vs {other}", expanded=True):
+                        cmp.render_combined_editor(cand, other, context_key="pane1")
+            
+            
+                    combined_key = f"combined-ta-{cand}-{other}-pane1"
+                    combined_text = st.session_state.get(combined_key, "")
+                    if not combined_text:
+                        seed_key = f"combined-draft-{cand}-{other}-pane1"
+                        combined_text = st.session_state.get(seed_key, "")
+            
+            
+                    import html as _html
+                    html_doc = f"""
+                    <html>
+                    <body style="font-family: Arial, sans-serif; font-size: 14px; color: #222;">
+                        <h2>Candidate Comparison – {cand} vs {other}</h2>
+            
+                        <h3>Comparison</h3>
+                        <pre style="white-space: pre-wrap; line-height:1.4;">{_html.escape(combined_text or "")}</pre>
+            
+                        <h3>Comparison Table</h3>
+                        {df.to_html(index=False, border=1, justify="left", escape=False)}
+            
+                        <p style="margin-top:20px; font-style:italic;">Exported from HR Dashboard</p>
+                    </body>
+                    </html>
+                    """.strip()
+            
+                    # Expose for email logic (optional)
+                    st.session_state[f"email_html_{cand}_{other}_pane1"] = html_doc
+            
+                    # Download button for the same HTML (includes the edited combined summary)
+                    st.download_button(
+                        "📄 Download Summary + Comparison (HTML)",
+                        data=html_doc.encode("utf-8"),
+                        file_name=f"{cand}_vs_{other}_summary_comparison.html",
+                        mime="text/html",
+                        key=f"dl-html-{cand}-{other}"
+                    )
+            
+                    st.divider()
 
-
-            st.divider()
-
-            # --- CSVs for this candidate (optional display) ---
             try:
                 csvs = list_csvs_for_candidate(cand)
             except Exception as e:
@@ -205,15 +327,11 @@ else:
 
             for path in csvs:
                 df = load_csv(path)
-                if df is not None:
-                    st.markdown(f"**{path.split('/')[-1]}**")
-                    st.dataframe(df, use_container_width=True)
-                else:
-                    st.warning(f"Failed to load `{path}`.")
-
-            # --- Athena fit calculation (using dashboard CSVs) ---
+    
             athena_path = next((p for p in csvs if "athena" in p.lower()), None)
             athena_df = load_csv(athena_path) if athena_path else None
+            # Combined editor for the current candidate vs. the first selected "other"
+
 
             def _col(df, target: str):
                 if df is None:
@@ -253,16 +371,3 @@ else:
             athena_fit, matches, tp_all, cf_all = athena_fit_from_flags(athena_df)
             st.caption(f"Athena fit: {athena_fit:.1%}")
 
-            with st.expander("Athena flag comparison", expanded=False):
-                if tp_all:
-                    st.markdown(
-                        f"**Matches ({len(matches)}/{len(tp_all)}):** "
-                        + (", ".join(sorted(matches)) if matches else "—")
-                    )
-                    missing = tp_all - matches
-                    st.markdown("**Missing:** " + (", ".join(sorted(missing)) if missing else "—"))
-                    extra = cf_all - tp_all
-                    if extra:
-                        st.markdown("**Candidate-only flags:** " + ", ".join(sorted(extra)))
-                else:
-                    st.markdown("_No Top Performers listed in Athena._")
