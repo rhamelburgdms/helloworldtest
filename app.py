@@ -4,7 +4,7 @@ import streamlit as st
 from functools import lru_cache
 from azure.storage.blob import BlobServiceClient
 from azure.identity import DefaultAzureCredential
-import numpy as np
+import numpy as np 
 import re, json
 from azure.storage.blob import BlobServiceClient
 
