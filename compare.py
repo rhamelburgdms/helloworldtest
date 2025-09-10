@@ -54,7 +54,7 @@ def draft_combined_summary(a_name: str, a_text: str, b_name: str, b_text: str) -
         f"{b_name} summary:** {b_text if b_text else '(no summary yet)'}\n\n"
         "— Compare strengths/risks/culture fit. Add hiring leaning and 3–5 probe questions. —"
     )
-
+'''
 def render_combined_editor(current_slug: str, other_slug: str, context_key: str = "compare") -> None:
     
     a_name, b_name = current_slug, other_slug
@@ -83,7 +83,7 @@ def render_combined_editor(current_slug: str, other_slug: str, context_key: str 
                 st.cache_data.clear()
             except Exception as e:
                 st.error(f"Save failed: {e}")
-
+'''
 # CSV listing + parsers (Athena/Genos) — used by the comparison table
 @st.cache_data(ttl=30, show_spinner=False)
 def _list_csvs_for_candidate(cand: str) -> list[str]:
@@ -160,8 +160,86 @@ def load_candidate_measure_maps(cand: str) -> tuple[dict[str, str], dict[str, st
     ath_cand_map, ath_top_map = _parse_athena(ath_df)
     ge_map = _parse_genos(ge_df)
     return ath_cand_map, ath_top_map, ge_map
+from typing import List
+import pandas as pd
+import streamlit as st
+
+@st.cache_data(ttl=30, show_spinner=True)
+def build_athena_table(candidates: List[str]) -> pd.DataFrame:
+    """
+    Table: Athena measures only → columns: Measure | <cand1> | ... | Top Performers
+    """
+    measures_order: List[str] = []
+    top_scores: dict[str, str] = {}
+    cand_maps: dict[str, dict[str, str]] = {}
+
+    for cand in candidates:
+        a_cand, a_top, _ = load_candidate_measure_maps(cand)
+        cand_maps[cand] = a_cand
+        if not top_scores and a_top:
+            top_scores = a_top
+        for m in a_cand.keys():
+            if m not in measures_order:
+                measures_order.append(m)
+
+    rows = []
+    for m in measures_order:
+        row = {"Measure": m, "Top Performers": top_scores.get(m, "")}
+        for cand in candidates:
+            row[cand] = cand_maps.get(cand, {}).get(m, "")
+        rows.append(row)
+
+    cols = ["Measure"] + candidates + ["Top Performers"]
+    return pd.DataFrame(rows, columns=cols)
 
 
+@st.cache_data(ttl=30, show_spinner=True)
+def build_gensos_table(candidates: List[str]) -> pd.DataFrame:
+    """
+    Table: Genos traits only → columns: Trait | <cand1> | ...
+    """
+    traits_order: List[str] = []
+    cand_maps: dict[str, dict[str, str]] = {}
+
+    for cand in candidates:
+        _, _, ge_map = load_candidate_measure_maps(cand)
+        cand_maps[cand] = ge_map
+        for t in ge_map.keys():
+            if t not in traits_order:
+                traits_order.append(t)
+
+    rows = []
+    for t in traits_order:
+        row = {"Trait": t}
+        for cand in candidates:
+            row[cand] = cand_maps.get(cand, {}).get(t, "")
+        rows.append(row)
+
+    cols = ["Trait"] + candidates
+    return pd.DataFrame(rows, columns=cols)
+
+
+def render_separate_tables(selected: List[str]) -> None:
+    if not selected:
+        st.info("Select at least one candidate to compare.")
+        return
+
+    athena_df = build_athena_table(selected)
+    genos_df  = build_gensos_table(selected)
+
+    if athena_df.empty and genos_df.empty:
+        st.warning("No Athena/Genos data found for the selected candidates.")
+        return
+
+    if not athena_df.empty:
+        st.markdown("### Athena scores")
+        st.dataframe(athena_df, use_container_width=True)
+
+    if not genos_df.empty:
+        st.markdown("### Genos bands")
+        st.dataframe(genos_df, use_container_width=True)
+
+'''
 @st.cache_data(ttl=30, show_spinner=True)
 def build_comparison_table(candidates: List[str]) -> pd.DataFrame:
     # Preserve order without duplicates
@@ -232,5 +310,33 @@ def render_comparison_table(selected: List[str], title: str = "Side-by-side scor
         return
     st.markdown(f"### {title}")
     st.dataframe(df, use_container_width=True)
+'''
+import re
+from html import escape as _escape
+import pandas as pd
+import streamlit as st
 
-# No top-level Streamlit UI here — keep this file import-safe!
+def build_compare_html(selected: list[str], summary_text: str, title: str) -> str:
+    """Return HTML containing the summary + the Athena and Genos tables."""
+    ath_df = build_athena_table(selected)
+    gen_df = build_gensos_table(selected)
+
+    sections = []
+    if not ath_df.empty:
+        sections.append("<h3>Athena scores</h3>" +
+                        ath_df.to_html(index=False, border=1, justify="left", escape=False))
+    if not gen_df.empty:
+        sections.append("<h3>Genos bands</h3>" +
+                        gen_df.to_html(index=False, border=1, justify="left", escape=False))
+
+    return f"""
+    <html>
+    <body style="font-family: Arial, sans-serif; font-size: 14px; color: #222;">
+      <h2>Cohesive Summary – {title}</h2>
+      <div style="white-space: pre-wrap; line-height:1.5;">{_escape((summary_text or '').strip())}</div>
+      {''.join(sections)}
+      <p style="margin-top:20px; font-style:italic;">Exported from HR Dashboard</p>
+    </body>
+    </html>
+    """.strip()
+
