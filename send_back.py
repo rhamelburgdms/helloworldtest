@@ -4,6 +4,7 @@ import streamlit as st
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from azure.identity import DefaultAzureCredential
 import re
+from pathlib import Path
 from html import unescape as _unescape
 
 @st.cache_resource(show_spinner=False)
@@ -27,8 +28,35 @@ def upload_text(path: str, text: str, *, content_type="text/html"):
         content_settings=ContentSettings(content_type=content_type),
     )
 
+
+def _slug(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", s.strip().lower()).strip("-")
+
+def _safe_join(prefix: str, name: str) -> str:
+    """Join a virtual folder with a filename safely for blob paths."""
+    prefix = prefix.strip("/")
+    name = Path(name).name  # prevent path traversal
+    return f"{prefix}/{name}" if prefix else name
+
+def _resolve_by_basename(basename: str) -> str | None:
+    """
+    Search the Finished container for a blob whose basename matches.
+    Return its full blob path or None.
+    """
+    cc = _archive_cc()
+    target = Path(basename).name.lower()
+    for item in cc.walk_blobs(name_starts_with=""):
+        n = getattr(item, "name", "") or ""
+        if n and Path(n).name.lower() == target:
+            return n
+    return None
+
 def render_candidate_download(cand: str, solo_html: str):
-    archive_path = f"{cand}_summary.html"  # fixed name, no timestamp
+    # finished/{cand}/email-ready/{slug(cand)}_summary.html
+    folder = f"{cand}/exports"
+    file_name = f"{_slug(cand)}_summary.html"
+    archive_path = _safe_join(folder, file_name)
+
     try:
         upload_text(archive_path, solo_html, content_type="text/html")
         st.toast(f"Archived to Blob: {archive_path}", icon="✅")
@@ -37,37 +65,55 @@ def render_candidate_download(cand: str, solo_html: str):
         st.warning(f"Downloaded locally, but failed to archive to Blob: {e}")
 
 def render_comparison_download(cand: str, other: str, html: str):
-    archive_path = f"{cand}_vs_{other}_cohesive_summary.html"
+    # Save under BOTH candidates so the file is easy to find in either folder
+    base_name = f"{_slug(cand)}-vs-{_slug(other)}.html"
+    cand_path  = _safe_join(f"{cand}/comparisons", base_name)
+    other_path = _safe_join(f"{other}/comparisons", base_name)
+
     try:
-        upload_text(archive_path, html, content_type="text/html")
-        st.toast(f"Comparison archived to Blob: {archive_path}", icon="✅")
+        upload_text(cand_path, html, content_type="text/html")
+        upload_text(other_path, html, content_type="text/html")
+        st.toast(f"Comparison archived:\n- {cand_path}\n- {other_path}", icon="✅")
     except Exception as e:
         st.warning(f"Downloaded locally, but failed to archive comparison: {e}")
 
+
 def load_summary_only(blob_name: str) -> str:
     """
-    Loads an HTML file from Finished and extracts only the cohesive summary text,
-    excluding the comparison table and other sections.
+    Loads an HTML comparison (or solo) file from Finished and extracts only the
+    cohesive summary text. Accepts either a full blob path or just a basename.
+    Prefers <!-- SUMMARY_START/END --> markers; falls back to #summary-text div,
+    then to the pre-<h3> section.
     """
     cc = _archive_cc()
+    path = blob_name.strip("/")
+
+    # If caller passed just a basename (no '/'), resolve it anywhere in Finished
+    if "/" not in path:
+        resolved = _resolve_by_basename(path)
+        if not resolved:
+            return ""
+        path = resolved
+
     try:
-        html_doc = cc.download_blob(blob_name).readall().decode("utf-8", errors="replace")
+        html = cc.download_blob(path).readall().decode("utf-8", "replace")
 
-        # --- Step 1: Locate the section before the table ---
-        # Grab everything from <h2> down to <h3>Comparison Table</h3>
-        match = re.search(r"<h2.*?</h2>(.*?)<h3>Comparison Table", html_doc, flags=re.S | re.I)
-        if match:
-            summary_html = match.group(1)
-        else:
-            # Fallback: if table isn't found, grab inside <body>
-            body_match = re.search(r"<body[^>]*>(.*?)</body>", html_doc, flags=re.S | re.I)
-            summary_html = body_match.group(1) if body_match else html_doc
+        # Prefer explicit markers we add when saving
+        m = re.search(r"<!--\s*SUMMARY_START\s*-->(.*?)<!--\s*SUMMARY_END\s*-->", html, re.S|re.I)
+        if not m:
+            # Fallback: <div id="summary-text">...</div>
+            m = re.search(r'<div[^>]+id=["\']summary-text["\'][^>]*>(.*?)</div>', html, re.S|re.I)
 
-        # --- Step 2: Remove HTML tags but preserve newlines ---
-        summary_html = re.sub(r"<br\s*/?>", "\n", summary_html)  # convert <br> to newlines
-        summary_text = re.sub(r"<[^>]+>", "", summary_html)      # strip all other HTML
-        return _unescape(summary_text).strip()
+        if m:
+            frag = m.group(1)
+            frag = re.sub(r"<br\s*/?>", "\n", frag, flags=re.I)  # keep line breaks
+            frag = re.sub(r"<[^>]+>", "", frag)                 # strip tags
+            return _unescape(frag).strip()
 
+        # Last resort: everything before the first <h3>
+        head = re.split(r"<h3", html, maxsplit=1, flags=re.I)[0]
+        head = re.sub(r"<[^>]+>", "", head)
+        return _unescape(head).strip()
     except Exception:
         return ""
 
@@ -76,7 +122,6 @@ def delete_candidate_from_dashboard(cand: str, container: str | None = None) -> 
     Permanently remove all blobs for a candidate from the dashboard container.
     Returns (count_deleted, list_of_deleted_blob_names).
     """
-    # Use send_back's own client to avoid circular import
     container = container or os.getenv("CONTAINER", "dashboard")
     cc = _make_bsc().get_container_client(container)
 
@@ -92,30 +137,3 @@ def delete_candidate_from_dashboard(cand: str, container: str | None = None) -> 
             st.warning(f"Failed to delete {blob_name}: {e}")
 
     return deleted, blobs_to_delete
-
-import re
-from html import unescape as _unescape
-
-def load_summary_only(blob_name: str) -> str:
-    cc = _archive_cc()
-    try:
-        html = cc.download_blob(blob_name).readall().decode("utf-8", "replace")
-
-        # Prefer explicit markers we add when saving
-        m = re.search(r"<!--\s*SUMMARY_START\s*-->(.*?)<!--\s*SUMMARY_END\s*-->", html, re.S|re.I)
-        if not m:
-            # Fallback: <div id="summary-text">...</div>
-            m = re.search(r'<div[^>]+id=["\']summary-text["\'][^>]*>(.*?)</div>', html, re.S|re.I)
-
-        if m:
-            frag = m.group(1)
-            frag = re.sub(r"<br\s*/?>", "\n", frag, flags=re.I)  # keep line breaks
-            frag = re.sub(r"<[^>]+>", "", frag)                 # strip tags
-            return _unescape(frag).strip()
-
-        # Last resort: everything before the first <h3> (tables usually start at an H3)
-        head = re.split(r"<h3", html, maxsplit=1, flags=re.I)[0]
-        head = re.sub(r"<[^>]+>", "", head)
-        return _unescape(head).strip()
-    except Exception:
-        return ""
