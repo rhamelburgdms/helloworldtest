@@ -8,7 +8,8 @@ from azure.identity import DefaultAzureCredential
 from agent_comparer import compare_summaries_agent 
 from send_back import render_candidate_download, delete_candidate_from_dashboard
 st.set_page_config(page_title="Candidate Page", page_icon="🧩", layout="wide")
-from send_back import _archive_cc  # you already have this
+from send_back import _archive_cc 
+
 import re
 if "removed_candidates" not in st.session_state:
     st.session_state.removed_candidates = set()
@@ -180,9 +181,30 @@ def build_candidate_email_table(cand: str, use_edits: bool, edited_summary: str)
     """
 
     return html
+    
+def _remove_and_refresh(cands: list[str]):
+    removed = []
+    missing = []
+    for name in cands:
+        try:
+            deleted_count, _ = delete_candidate_from_dashboard(name)
+            if deleted_count > 0:
+                removed.append(name)
+                st.session_state.removed_candidates.add(name)
+            else:
+                missing.append(name)
+        except Exception:
+            missing.append(name)
 
-st.title("Candidates")
-st.caption("Each candidate is a folder under the 'dashboard' container. Expand to view data and edit the summary.")
+    if removed:
+        st.toast(f"Removed {len(removed)} candidate(s): {', '.join(removed)}", icon="✅")
+    if missing:
+        st.toast(f"No files found for: {', '.join(missing)}", icon="⚠️")
+    st.cache_data.clear()
+    st.rerun()
+
+st.title("Candidate Bank")
+st.caption("Expand each candidate to view data, make comparisons, and edit summaries.")
 # session bootstrap
 if "candidates" not in st.session_state:
     st.session_state["candidates"] = list_candidate_prefixes()  # seed UI list
@@ -201,7 +223,7 @@ candidates = [c for c in candidates if c not in st.session_state.removed_candida
 
 if not candidates:
     st.info("No candidates are pending approval.")
-    
+
 else:
     for cand in candidates:
     # keep this expander open if it was the last interacted one
@@ -284,8 +306,27 @@ else:
                     use_edits=True,
                     edited_summary=edited_summary,
                 )
+                
+
+                # Solo: one-click Save & Download, then remove the candidate
+                clicked = st.download_button(
+                    "📄 Save and Download (HTML)",
+                    data=full_html.encode("utf-8"),
+                    file_name=f"{cand}_summary.html",
+                    mime="text/html",
+                    key=f"dl-solo-html-{cand}",
+                )
+                
+                if clicked:
+                    # persist the plain-text summary where the app reads it from
+                    save_summary(cand, edited_summary)         # writes dashboard/{cand}/summary.txt
+                
+                    # also archive the pretty HTML export
+                    render_candidate_download(cand, full_html) # currently goes to Finished
+                    st.success("Saved summary to dashboard and archived HTML.")
+
                 if st.button(
-                    "🗑️ Remove from dashboard (permanent)",
+                    "🗑️ Remove from dashboard",
                     key=f"rm-dash-solo-{cand}",
                     on_click=partial(set_active, cand),
                 ):
@@ -295,25 +336,7 @@ else:
                     else:
                         st.toast(f"No files found for {cand} under dashboard/", icon="⚠️")
                     st.session_state.setdefault("removed_candidates", set()).add(cand)
-                    st.rerun()
-                
-        
-
-                # Solo: one-click Save & Download, then remove the candidate
-                clicked = st.download_button(
-                    "📄 Save & Download (HTML)",
-                    data=full_html.encode("utf-8"),
-                    file_name=f"{cand}_summary.html",
-                    mime="text/html",
-                    key=f"dl-solo-html-{cand}",
-                )
-                
-                if clicked:
-                    # archive to Blob (send_back.render_candidate_download expects cand + HTML)
-                    render_candidate_download(cand, full_html)
-                    # hide this candidate from the UI list
-                    st.session_state.removed_candidates.add(cand)
-                    st.rerun()
+                    st.rerun()            
             else:
 
     
@@ -330,63 +353,149 @@ else:
                     st.info("Compare mode is active. The single-candidate editor is hidden.")
             
                     # Selected candidates
-                    selected = [cand] + others
-            
-                    # Build + render comparison table
-                    df = cmp.build_comparison_table(selected)
-                    cmp.render_comparison_table(selected, title=f"{cand} vs selected candidates")
-            
-                    # Pick the "other" candidate (first selected)
-                    other = others[0]
-            
+                    # Selected candidates
+                selected = [cand] + others
                 
-                    compare_blob = f"{_slug(cand)}_vs_{_slug(other)}_cohesive_summary.html"
-                    agent_key = f"agent_output_{cand}_{other}_pane1"
-            
+                # --- build & render the two separate tables (on-screen only) ---
+                ath_df = cmp.build_athena_table(selected)
+                gen_df = cmp.build_gensos_table(selected)
+                
+                if ath_df.empty and gen_df.empty:
+                    st.warning("No Athena/Genos data found for the selected candidates.")
+                else:
+                    if not ath_df.empty:
+                        st.markdown("### Athena scores")
+                        st.dataframe(ath_df, use_container_width=True)
+                    if not gen_df.empty:
+                        st.markdown("### Genos bands")
+                        st.dataframe(gen_df, use_container_width=True)
+                
+                # Pick the "other" candidate (first selected)
+                other = others[0]
+                # Build a single DF for the agent (from the two tables)
+                import pandas as pd
+                parts = []
+                if ath_df is not None and not ath_df.empty:
+                    a = ath_df.drop(columns=["Top Performers"], errors="ignore").copy()
+                    a.insert(0, "Section", "Athena")
+                    parts.append(a)
+                if gen_df is not None and not gen_df.empty:
+                    g = gen_df.copy()
+                    g.insert(0, "Section", "Genos")
+                    parts.append(g)
+                df_agent = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
-                    from send_back import load_summary_only
+                # Blob path + editor key
+                compare_blob = f"{_slug(cand)}_vs_{_slug(other)}_cohesive_summary.html"
+                editor_key   = f"cmp-summary-text-{cand}-{other}"  # stores TEXT only
+                
+                # Seed the editor with summary-only text (not full HTML)
+                from send_back import load_summary_only
+                if _finished_exists(compare_blob) and editor_key not in st.session_state:
+                    st.info("Loaded existing cohesive summary text.")
+                    st.session_state[editor_key] = load_summary_only(compare_blob)
+                else:
+                    st.session_state.setdefault(editor_key, "")
+                # If a generate click is pending, produce text now (before editor is drawn)
+                    if st.session_state.get(f"pending_gen_{cand}_{other}"):
+                        with st.spinner("Comparing…"):
+                            from agent_comparer import compare_summaries_agent
+                            out_text = compare_summaries_agent(cand=cand, other=other, df=df_agent)
+                            st.session_state[editor_key] = out_text
+                            st.session_state[f"pending_gen_{cand}_{other}"] = False
 
-                    if _finished_exists(compare_blob):
-                        st.info("Loaded existing cohesive summary from Finished.")
-                        st.session_state[agent_key] = load_summary_only(compare_blob)
-                    else:
-                        st.session_state[agent_key] = ""
+                # --- summary editor (TEXT ONLY) ---
+                summary_text = st.text_area(
+                    "Cohesive summary (tables are not shown here)",
+                    key=editor_key,          # bind by key only
+                    height=300,
+                )
 
+                
+                # --- optional: Generate draft summary (grounded on both tables) ---
+                from functools import partial
+                from agent_comparer import compare_summaries_agent
+                
+                # Build a single DF for the agent (reuses ath_df/gen_df we already computed)
+                import pandas as pd
+                parts = []
+                if ath_df is not None and not ath_df.empty:
+                    a = ath_df.drop(columns=["Top Performers"], errors="ignore").copy()
+                    a.insert(0, "Section", "Athena")
+                    parts.append(a)
+                if gen_df is not None and not gen_df.empty:
+                    g = gen_df.copy()
+                    g.insert(0, "Section", "Genos")
+                    parts.append(g)
+                df_agent = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+                
+                cols = st.columns([1,1])
+                
+                with cols[0]:
+                    # Only show "Generate" if the editor is empty (keep your prior behavior)
+                    if not st.session_state.get(editor_key):
+                        if st.button("✨ Generate cohesive summary", key=f"gen-{cand}-{other}"):
+                            st.session_state[f"pending_gen_{cand}_{other}"] = True
+                            st.rerun()
 
-            
-                    # Show Generate only if nothing in Finished / session yet
-                    if not st.session_state.get(agent_key):
-                        from agent_comparer import compare_summaries_agent
-            
-                        if st.button(
-                            "✨ Generate cohesive summary",
-                            key=f"agent-btn-{cand}-{other}",
-                            on_click=partial(set_active, cand),
-                        ):
                             with st.spinner("Comparing…"):
-                                # 1) Get model output (TEXT) grounded on df
-                                out_text = compare_summaries_agent(cand=cand, other=other, df=df)
-            
-                                # 2) Wrap into HTML (store ready-to-serve artifact)
-                                from html import escape as _escape
-                                html_doc = f"""
-                                <html>
-                                <body style="font-family: Arial, sans-serif; font-size: 14px; color: #222;">
-                                    <h2>Cohesive Summary – {cand} vs {other}</h2>
-                                    <div style="white-space: pre-wrap; line-height:1.5;">{_escape(out_text)}</div>
-                                    <h3>Comparison Table</h3>
-                                    {df.to_html(index=False, border=1, justify="left", escape=False)}
-                                    <p style="margin-top:20px; font-style:italic;">Exported from HR Dashboard</p>
-                                </body>
-                                </html>
-                                """.strip()  # <-- properly closed
-            
-                                # 3) Save comparison to Finished and seed session
-                                from send_back import render_comparison_download
-                                render_comparison_download(cand, other, html_doc)
-                                st.session_state[agent_key] = html_doc
-            
-                                st.success("Cohesive summary generated and stored in Finished.")
+                                out_text = compare_summaries_agent(cand=cand, other=other, df=df_agent)
+                                st.session_state[editor_key] = out_text
+                                st.toast("Draft generated — edit it above.", icon="📝")
+                
+                # --- Save & Download: combine editor TEXT + both tables into HTML ---
+                with cols[1]:
+                    from html import escape as _escape
+                
+                    # Build HTML on every run from the editor text + both tables
+                    sections_html = []
+                    if ath_df is not None and not ath_df.empty:
+                        sections_html.append(
+                            "<h3>Athena scores</h3>" +
+                            ath_df.to_html(index=False, border=1, justify="left", escape=False)
+                        )
+                    if gen_df is not None and not gen_df.empty:
+                        sections_html.append(
+                            "<h3>Genos bands</h3>" +
+                            gen_df.to_html(index=False, border=1, justify="left", escape=False)
+                        )
+                    html_doc = f"""
+                    <html>
+                    <body style="font-family: Arial, sans-serif; font-size: 14px; color: #222;">
+                      <h2>Cohesive Summary – {cand} vs {other}</h2>
+                    
+                      <!-- SUMMARY_START -->
+                      <div id="summary-text" style="white-space: pre-wrap; line-height:1.5;">
+                        {_escape((summary_text or '').strip())}
+                      </div>
+                      <!-- SUMMARY_END -->
+                    
+                      {''.join(sections_html)}
+                      <p style="margin-top:20px; font-style:italic;">Exported from HR Dashboard</p>
+                    </body>
+                    </html>
+                    """.strip()
+
+                                        
+                   
+                
+                    # Use download_button to actually trigger the browser download
+                    file_name = f"{_slug(cand)}-vs-{_slug(other)}.html"
+                    clicked = st.download_button(
+                        "💾 Save & Download (HTML)",
+                        data=html_doc.encode("utf-8"),
+                        file_name=file_name,
+                        mime="text/html",
+                        key=f"dl-{_slug(cand)}-{_slug(other)}",
+                    )
+        
+                    # Optional: also archive to Finished only when user clicks Download
+                    if clicked:
+                        from send_back import render_comparison_download
+                        render_comparison_download(cand, other, html_doc)
+                        st.success("Saved & ready to download.")
+                                
+
             
                     else:
                         # Optional: allow override
@@ -401,52 +510,19 @@ else:
                             # try: _archive_cc().delete_blob(compare_blob)
                             # except Exception: pass
                             st.experimental_rerun()
-            
-                    # ---------- Editor + one-button Save/Download (only if we have HTML) ----------
-                    agent_out_html = st.session_state.get(agent_key, "")
-                    if agent_out_html:
-                        # Optional preview
-                        st.subheader("Cohesive Summary (preview)", anchor=False)
-                        st.components.v1.html(agent_out_html, height=320, scrolling=True)
-            
-                        edited_key = f"edited_agent_out_{cand}_{other}_pane1"
-                        if not st.session_state.get(edited_key):
-                            st.session_state[edited_key] = agent_out_html  # seed once
-            
-                        with st.expander("✏️ Edit cohesive summary (HTML)", expanded=False):
-                            st.text_area(
-                                "This is the exact HTML that will be saved",
-                                key=edited_key,
-                                height=260,
-                            )
-            
-                        edited_html = st.session_state[edited_key]
-            
-                        clicked = st.download_button(
-                            "📄 Save to Finished & Download",
-                            data=edited_html.encode("utf-8"),
-                            file_name=f"{_slug(cand)}_vs_{_slug(other)}_cohesive_summary.html",
-                            mime="text/html",
-                            key=f"dl-finished-{cand}-{other}",
-                        )
-                        if clicked:
-                            # Update Finished with the edited HTML
-                            try:
-                                _archive_cc().upload_blob(
-                                    name=compare_blob,
-                                    data=edited_html.encode("utf-8"),
-                                    overwrite=True,
-                                    content_settings=ContentSettings(content_type="text/html"),
-                                )
-                                st.success("Saved to Finished.")
-                            except Exception as e:
-                                st.warning(f"Failed to save to Finished: {e}")
-                    # ------------------------------------------------------------------------------
-            
-                    st.divider()
-            
-            
 
+                    
+                    # 'selected' already exists above as: selected = [cand] + others
+                    cols_rm = st.columns([1, 1])
+                    '''
+                    with cols_rm[0]:
+                        if st.button("🗑️ Remove JUST this candidate", key=f"rm-just-{_slug(cand)}"):
+                            _remove_and_refresh([cand])  # only the primary candidate in this expander
+                    '''
+                    with cols_rm[1]:
+                        # Removes the primary + all currently compared candidates in this expander
+                        if st.button("🗑️ Remove all compared candidates", key=f"rm-all-{_slug(cand)}"):
+                            _remove_and_refresh(selected)
 
 
             try:
@@ -503,3 +579,4 @@ else:
 
             athena_fit, matches, tp_all, cf_all = athena_fit_from_flags(athena_df)
             st.caption(f"Athena fit: {athena_fit:.1%}")
+
