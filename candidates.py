@@ -346,9 +346,10 @@ else:
                 key_multi = f"cmp-multi-{cand}"
                 others = st.session_state.get(key_multi, [])
                 compare_mode = len(others) > 0
-            
-                if not compare_mode:
-                    st.info("Select at least one other candidate to compare.")
+                
+                if len(all_candidates) <= 1:
+                    st.info("Comparison requires at least two candidates in the dashboard.")
+                    st.stop()
                 else:
                     st.info("Compare mode is active. The single-candidate editor is hidden.")
             
@@ -386,38 +387,20 @@ else:
                 df_agent = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
                 # Blob path + editor key
+                # ---- identify blob + editor key ------------------------------------------------
                 compare_blob = f"{_slug(cand)}_vs_{_slug(other)}_cohesive_summary.html"
                 editor_key   = f"cmp-summary-text-{cand}-{other}"  # stores TEXT only
                 
-                # Seed the editor with summary-only text (not full HTML)
+                # ---- preload previously-saved text (once) -------------------------------------
                 from send_back import load_summary_only
-                if _finished_exists(compare_blob) and editor_key not in st.session_state:
-                    st.info("Loaded existing cohesive summary text.")
-                    st.session_state[editor_key] = load_summary_only(compare_blob)
-                else:
-                    st.session_state.setdefault(editor_key, "")
-                # If a generate click is pending, produce text now (before editor is drawn)
-                    if st.session_state.get(f"pending_gen_{cand}_{other}"):
-                        with st.spinner("Comparing…"):
-                            from agent_comparer import compare_summaries_agent
-                            out_text = compare_summaries_agent(cand=cand, other=other, df=df_agent)
-                            st.session_state[editor_key] = out_text
-                            st.session_state[f"pending_gen_{cand}_{other}"] = False
-
-                # --- summary editor (TEXT ONLY) ---
-                summary_text = st.text_area(
-                    "Cohesive summary (tables are not shown here)",
-                    key=editor_key,          # bind by key only
-                    height=300,
-                )
-
+                if editor_key not in st.session_state:
+                    if _finished_exists(compare_blob):
+                        st.session_state[editor_key] = load_summary_only(compare_blob)
+                        st.info("Loaded existing cohesive summary text.")
+                    else:
+                        st.session_state[editor_key] = ""  # empty until user generates
                 
-                # --- optional: Generate draft summary (grounded on both tables) ---
-                from functools import partial
-                from agent_comparer import compare_summaries_agent
-                
-                # Build a single DF for the agent (reuses ath_df/gen_df we already computed)
-                import pandas as pd
+                # ---- (re)build the agent dataframe upfront ------------------------------------
                 parts = []
                 if ath_df is not None and not ath_df.empty:
                     a = ath_df.drop(columns=["Top Performers"], errors="ignore").copy()
@@ -429,25 +412,38 @@ else:
                     parts.append(g)
                 df_agent = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
                 
-                cols = st.columns([1,1])
+                # ---- handle a pending generate BEFORE any widgets are drawn --------------------
+                pending_flag = f"pending_gen_{cand}_{other}"
+                if st.session_state.get(pending_flag):
+                    with st.spinner("Comparing…"):
+                        out_text = compare_summaries_agent(cand=cand, other=other, df=df_agent)
+                        st.session_state[editor_key] = out_text
+                    st.session_state[pending_flag] = False
+                    st.toast("Draft generated — edit it below.", icon="📝")
+                
+                # ---- UI: show either the Generate button OR the editor -------------------------
+                cols = st.columns([1, 1])
                 
                 with cols[0]:
-                    # Only show "Generate" if the editor is empty (keep your prior behavior)
+                    # Only show the Generate button when there's no text yet
                     if not st.session_state.get(editor_key):
-                        if st.button("✨ Generate cohesive summary", key=f"gen-{cand}-{other}"):
-                            st.session_state[f"pending_gen_{cand}_{other}"] = True
+                        if st.button("✨ Generate cohesive summary", key=f"gen-{cand}-{other}",
+                                     on_click=partial(set_active, cand)):
+                            st.session_state[pending_flag] = True
                             st.rerun()
-
-                            with st.spinner("Comparing…"):
-                                out_text = compare_summaries_agent(cand=cand, other=other, df=df_agent)
-                                st.session_state[editor_key] = out_text
-                                st.toast("Draft generated — edit it above.", icon="📝")
                 
-                # --- Save & Download: combine editor TEXT + both tables into HTML ---
+                # Only render the editor AFTER we have text (from prior save or after generate)
+                if st.session_state.get(editor_key):
+                    summary_text = st.text_area(
+                        "Cohesive summary",
+                        key=editor_key,      # bind by key only; no value= to avoid re-instantiation issues
+                        height=300,
+                    )
+                else:
+                    st.info("Click **Generate cohesive summary** to create a draft.")
+                
+                # ---- build HTML (tables already computed) -------------------------------------
                 with cols[1]:
-                    from html import escape as _escape
-                
-                    # Build HTML on every run from the editor text + both tables
                     sections_html = []
                     if ath_df is not None and not ath_df.empty:
                         sections_html.append(
@@ -459,27 +455,25 @@ else:
                             "<h3>Genos bands</h3>" +
                             gen_df.to_html(index=False, border=1, justify="left", escape=False)
                         )
+                
+                    from html import escape as _escape
                     html_doc = f"""
                     <html>
                     <body style="font-family: Arial, sans-serif; font-size: 14px; color: #222;">
                       <h2>Cohesive Summary – {cand} vs {other}</h2>
-                    
+                
                       <!-- SUMMARY_START -->
                       <div id="summary-text" style="white-space: pre-wrap; line-height:1.5;">
-                        {_escape((summary_text or '').strip())}
+                        {_escape((st.session_state.get(editor_key) or '').strip())}
                       </div>
                       <!-- SUMMARY_END -->
-                    
+                
                       {''.join(sections_html)}
                       <p style="margin-top:20px; font-style:italic;">Exported from HR Dashboard</p>
                     </body>
                     </html>
                     """.strip()
-
-                                        
-                   
                 
-                    # Use download_button to actually trigger the browser download
                     file_name = f"{_slug(cand)}-vs-{_slug(other)}.html"
                     clicked = st.download_button(
                         "💾 Save & Download (HTML)",
@@ -488,15 +482,12 @@ else:
                         mime="text/html",
                         key=f"dl-{_slug(cand)}-{_slug(other)}",
                     )
-        
-                    # Optional: also archive to Finished only when user clicks Download
                     if clicked:
                         from send_back import render_comparison_download
                         render_comparison_download(cand, other, html_doc)
                         st.success("Saved & ready to download.")
-                                
-
-            
+                
+                            
                     else:
                         # Optional: allow override
                         if st.button(
@@ -514,11 +505,6 @@ else:
                     
                     # 'selected' already exists above as: selected = [cand] + others
                     cols_rm = st.columns([1, 1])
-                    '''
-                    with cols_rm[0]:
-                        if st.button("🗑️ Remove JUST this candidate", key=f"rm-just-{_slug(cand)}"):
-                            _remove_and_refresh([cand])  # only the primary candidate in this expander
-                    '''
                     with cols_rm[1]:
                         # Removes the primary + all currently compared candidates in this expander
                         if st.button("🗑️ Remove all compared candidates", key=f"rm-all-{_slug(cand)}"):
