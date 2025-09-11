@@ -227,14 +227,13 @@ if "open_cand" not in st.session_state:
     st.session_state["open_cand"] = None
 
 # List candidates
-candidates = list_candidate_prefixes()
+# Always compute fresh (list_candidate_prefixes is @st.cache_data but you clear it on delete)
+current_candidates = list_candidate_prefixes()
 
-if "candidates" not in st.session_state:
-    st.session_state.candidates = list_candidate_prefixes()
-candidates = st.session_state.candidates
-candidates = [c for c in candidates if c not in st.session_state.removed_candidates]
+# Hide anything you just removed in this session (instant UX)
+current_candidates = [c for c in current_candidates if c not in st.session_state.removed_candidates]
 
-if not candidates:
+if not current_candidates:
     st.info("No candidates are pending approval.")
 
 else:
