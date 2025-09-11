@@ -85,20 +85,7 @@ def list_candidate_prefixes(_nonce: int) -> list[str]:
 
 # use it:
 current_candidates = list_candidate_prefixes(st.session_state["refresh_nonce"])
-'''
-# We cache candidate data for 30 seconds so if anything changes in that 30 seconds it gets updated
-@st.cache_data(ttl=2)
-def list_candidate_prefixes() -> list[str]: # A list of strings 
-    cc = get_cc() # Grab the container client
-    prefixes = set() # Store prefixes in an empty set, because "prefixes" are the file names
-    for item in cc.walk_blobs(delimiter="/"): # Pulling names from the folders
-        if hasattr(item, "name") and item.name:
-            p = item.name.strip("/")
-            if p:
-                prefixes.add(p)
-                
-    return sorted(prefixes)
-'''
+
 # Cache data for 30 seconds
 #@st.cache_data(ttl=600)
 def list_csvs_for_candidate(cand: str) -> list[str]:
@@ -353,7 +340,7 @@ else:
                 key_multi = f"cmp-multi-{cand}"
                 others = st.multiselect(
                     f"Compare {cand} with others",
-                    options=[c for c in all_candidates if c != cand],
+                    options=[c for c in current_candidates if c != cand],
                     default=st.session_state.get(key_multi, []),
                     key=key_multi,
                     on_change=partial(set_active, cand),
