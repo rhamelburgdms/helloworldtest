@@ -116,7 +116,23 @@ def load_summary_only(blob_name: str) -> str:
         return _unescape(head).strip()
     except Exception:
         return ""
+def delete_candidate_from_dashboard(cand: str) -> tuple[int, list[str]]:
+    container = os.getenv("CONTAINER", "dashboard")
+    cc = make_bsc().get_container_client(container)
+    prefix = f"{cand.rstrip('/')}/"
 
+    # list everything under the prefix
+    names = [b.name for b in cc.list_blobs(name_starts_with=prefix)]
+    deleted, errors = 0, []
+    for name in names:
+        try:
+            cc.get_blob_client(name).delete_blob(delete_snapshots="include")
+            deleted += 1
+        except Exception as e:
+            errors.append(f"{name}: {e}")
+    return deleted, errors
+
+'''
 def delete_candidate_from_dashboard(cand: str, container: str | None = None) -> tuple[int, list[str]]:
     """
     Permanently remove all blobs for a candidate from the dashboard container.
@@ -137,3 +153,4 @@ def delete_candidate_from_dashboard(cand: str, container: str | None = None) -> 
             st.warning(f"Failed to delete {blob_name}: {e}")
 
     return deleted, blobs_to_delete
+'''
