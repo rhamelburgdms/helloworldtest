@@ -143,12 +143,25 @@ def build_candidate_email_table(cand: str, use_edits: bool, edited_summary: str)
     athena_df = load_csv(athena_path) if athena_path else None
     genos_df = load_csv(genos_path) if genos_path else None
     # Start HTML email structure
+    from html import escape as _escape
+    import re as _re
+
+    raw = edited_summary if use_edits else load_summary(cand)
+    raw = raw or ""
+    safe_text = _escape(raw)
+    safe_text = _re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", safe_text)
+    
     html = f"""
     <html>
     <body style="font-family: Arial, sans-serif; font-size: 14px; color: #222;">
         <h2>Candidate Summary – {cand}</h2>
-        <p>{edited_summary if use_edits else load_summary(cand)}</p>
+        <div style="white-space: pre-wrap; line-height:1.5;">
+            {safe_text}
+        </div>
+    </body>
+    </html>
     """
+
 
     # add athena table if athena table is available
     if athena_df is not None and not athena_df.empty:
@@ -226,9 +239,9 @@ if not candidates:
 
 else:
     for cand in candidates:
-    # keep this expander open if it was the last interacted one
+        # keep this expander open if it was the last interacted one
         is_open = (st.session_state.active_cand == cand)
-    
+
         with st.expander(cand, expanded=is_open):
             # Any widget inside should mark this cand as active on change
             mode = st.radio(
@@ -239,19 +252,12 @@ else:
                 key=f"mode-{cand}",
                 on_change=partial(set_active, cand),   # ← keeps expander open
             )
-    
-            # Example: compare multiselect
-            selected = st.multiselect(
-                f"Compare {cand} with others",
-                options=[c for c in all_candidates if c != cand],
-                default=st.session_state.get("compare_selections", {}).get(cand, []),
-                key=f"cmp-multi-{cand}",
-                on_change=partial(set_active, cand),   # ← keeps expander open
-            )
-    
-            # Example: text area in Solo view
+
             if mode == "Solo view":
-                # Get current text
+                # OPTIONAL: clear compare picks when leaving Compare
+                st.session_state.pop(f"cmp-multi-{cand}", None)
+
+            
                 edited_summary = st.text_area(
                     f"Edit Summary – {cand}",
                     value=load_summary(cand),
@@ -259,8 +265,6 @@ else:
                     key=f"solo-ta-{cand}",
                     on_change=partial(set_active, cand),
                 )
-            
-                # Keep it in session for later reuse
                 st.session_state[f"edited_summary_{cand}"] = edited_summary
             
                 # Build HTML for email/download including edits
@@ -338,28 +342,31 @@ else:
                     st.session_state.setdefault("removed_candidates", set()).add(cand)
                     st.rerun()            
             else:
-
-    
                 import compare as cmp
-            
-                # Reuse the existing multiselect; don't recreate it with the same key
+
+        
                 key_multi = f"cmp-multi-{cand}"
-                others = st.session_state.get(key_multi, [])
-                compare_mode = len(others) > 0
-            
-                if not compare_mode:
-                    st.info("Select at least one other candidate to compare.")
-                else:
-                    st.info("Compare mode is active. The single-candidate editor is hidden.")
-            
-                    # Selected candidates
-                    # Selected candidates
+                others = st.multiselect(
+                    f"Compare {cand} with others",
+                    options=[c for c in all_candidates if c != cand],
+                    default=st.session_state.get(key_multi, []),
+                    key=key_multi,
+                    on_change=partial(set_active, cand),
+                )
+
+
+                # Require at least one other candidate
+                if not others:
+                    st.info("Pick at least one other candidate to compare with this one.")
+                    # Show the info and skip the rest of this candidate, but keep rendering others
+                    continue
+
+
                 selected = [cand] + others
-                
-                # --- build & render the two separate tables (on-screen only) ---
+
                 ath_df = cmp.build_athena_table(selected)
                 gen_df = cmp.build_gensos_table(selected)
-                
+
                 if ath_df.empty and gen_df.empty:
                     st.warning("No Athena/Genos data found for the selected candidates.")
                 else:
@@ -369,8 +376,7 @@ else:
                     if not gen_df.empty:
                         st.markdown("### Genos bands")
                         st.dataframe(gen_df, use_container_width=True)
-                
-                # Pick the "other" candidate (first selected)
+
                 other = others[0]
                 # Build a single DF for the agent (from the two tables)
                 import pandas as pd
@@ -385,39 +391,18 @@ else:
                     parts.append(g)
                 df_agent = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
-                # Blob path + editor key
                 compare_blob = f"{_slug(cand)}_vs_{_slug(other)}_cohesive_summary.html"
                 editor_key   = f"cmp-summary-text-{cand}-{other}"  # stores TEXT only
                 
-                # Seed the editor with summary-only text (not full HTML)
                 from send_back import load_summary_only
-                if _finished_exists(compare_blob) and editor_key not in st.session_state:
-                    st.info("Loaded existing cohesive summary text.")
-                    st.session_state[editor_key] = load_summary_only(compare_blob)
-                else:
-                    st.session_state.setdefault(editor_key, "")
-                # If a generate click is pending, produce text now (before editor is drawn)
-                    if st.session_state.get(f"pending_gen_{cand}_{other}"):
-                        with st.spinner("Comparing…"):
-                            from agent_comparer import compare_summaries_agent
-                            out_text = compare_summaries_agent(cand=cand, other=other, df=df_agent)
-                            st.session_state[editor_key] = out_text
-                            st.session_state[f"pending_gen_{cand}_{other}"] = False
-
-                # --- summary editor (TEXT ONLY) ---
-                summary_text = st.text_area(
-                    "Cohesive summary (tables are not shown here)",
-                    key=editor_key,          # bind by key only
-                    height=300,
-                )
-
+                if editor_key not in st.session_state:
+                    if _finished_exists(compare_blob):
+                        st.session_state[editor_key] = load_summary_only(compare_blob)
+                        st.info("Loaded existing cohesive summary text.")
+                    else:
+                        st.session_state[editor_key] = ""  # empty until user generates
                 
-                # --- optional: Generate draft summary (grounded on both tables) ---
-                from functools import partial
-                from agent_comparer import compare_summaries_agent
-                
-                # Build a single DF for the agent (reuses ath_df/gen_df we already computed)
-                import pandas as pd
+        
                 parts = []
                 if ath_df is not None and not ath_df.empty:
                     a = ath_df.drop(columns=["Top Performers"], errors="ignore").copy()
@@ -428,103 +413,133 @@ else:
                     g.insert(0, "Section", "Genos")
                     parts.append(g)
                 df_agent = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
-                
-                cols = st.columns([1,1])
-                
-                with cols[0]:
-                    # Only show "Generate" if the editor is empty (keep your prior behavior)
-                    if not st.session_state.get(editor_key):
-                        if st.button("✨ Generate cohesive summary", key=f"gen-{cand}-{other}"):
-                            st.session_state[f"pending_gen_{cand}_{other}"] = True
-                            st.rerun()
+             
+                pending_flag = f"pending_gen_{cand}_{other}"
+                if st.session_state.get(pending_flag):
+                    with st.spinner("Comparing…"):
+                        out_text = compare_summaries_agent(cand=cand, other=other, df=df_agent)
+                        st.session_state[editor_key] = out_text
+                    st.session_state[pending_flag] = False
+                    st.toast("Draft generated — edit it below.", icon="📝")
+            
+                has_text = bool(st.session_state.get(editor_key))
 
-                            with st.spinner("Comparing…"):
-                                out_text = compare_summaries_agent(cand=cand, other=other, df=df_agent)
-                                st.session_state[editor_key] = out_text
-                                st.toast("Draft generated — edit it above.", icon="📝")
+        
+                st.divider()
+                t1, t2, t3, t4 = st.columns([1.3, 1.2, 1.2, 1.6])
                 
-                # --- Save & Download: combine editor TEXT + both tables into HTML ---
-                with cols[1]:
-                    from html import escape as _escape
+                # 1) Generate (enabled only when no draft yet)
+                with t1:
+                    if not has_text:
+                        if st.button(
+                            "✨ Generate cohesive summary",
+                            key=f"gen-{cand}-{other}",
+                            help="Draft a first pass using the comparison tables",
+                            on_click=partial(set_active, cand),  # this should already exist in your code
+                        ):
+                            st.session_state[pending_flag] = True
+                            st.rerun()
+                    else:
+                        st.button(
+                            "✨ Generate cohesive summary",
+                            disabled=True,
+                            key=f"gen-disabled-{cand}-{other}",
+                        )
                 
-                    # Build HTML on every run from the editor text + both tables
+    
+                with t2:
                     sections_html = []
                     if ath_df is not None and not ath_df.empty:
                         sections_html.append(
-                            "<h3>Athena scores</h3>" +
-                            ath_df.to_html(index=False, border=1, justify="left", escape=False)
+                            "<h3>Athena scores</h3>" + ath_df.to_html(index=False, border=1, justify="left", escape=False)
                         )
                     if gen_df is not None and not gen_df.empty:
                         sections_html.append(
-                            "<h3>Genos bands</h3>" +
-                            gen_df.to_html(index=False, border=1, justify="left", escape=False)
+                            "<h3>Genos bands</h3>" + gen_df.to_html(index=False, border=1, justify="left", escape=False)
                         )
+                
+                    from html import escape as _escape
+                    import re as _re
+                
+                    def _slug_local(s: str) -> str:
+                        return _re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-")
+                
+                    # --- Build formatted summary HTML (supports inline "1. 2. 3." on one line) ---
+                    raw = (st.session_state.get(editor_key, "") or "").replace("\r\n", "\n")
+
+                    # Safer pattern: number-dot-space not preceded by '/' or a digit
+                    # Works for both inline and multi-line lists; avoids matching '2.' inside '2/2.'
+                    pattern = r'(?<![/\d])\b\d+\.\s+'
+                    
+                    matches = list(_re.finditer(pattern, raw))
+                    if len(matches) >= 2:
+                        # Everything before the first real list marker
+                        before = raw[:matches[0].start()].strip()
+                        tail   = raw[matches[0].start():]
+                    
+                        # Split tail on subsequent real list markers
+                        items = [p.strip() for p in _re.split(pattern, tail) if p.strip()]
+                    
+                        list_html = "<ol>" + "".join(f"<li>{_escape(it)}</li>" for it in items) + "</ol>"
+                        head_html = f'<div style="white-space: pre-wrap; line-height:1.5;">{_escape(before)}</div>' if before else ""
+                        current_html = head_html + list_html
+                    else:
+                        # No (or only one) real list marker → render as pre-wrapped text
+                        current_html = f'<div style="white-space: pre-wrap; line-height:1.5;">{_escape(raw.strip())}</div>'
+                    
+                    # Convert Markdown-style **bold** to <strong> after escaping/building
+                    current_html = _re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", current_html)
+                
+                    # --- Build the full HTML document, inserting the formatted summary ---
                     html_doc = f"""
                     <html>
                     <body style="font-family: Arial, sans-serif; font-size: 14px; color: #222;">
                       <h2>Cohesive Summary – {cand} vs {other}</h2>
-                    
                       <!-- SUMMARY_START -->
-                      <div id="summary-text" style="white-space: pre-wrap; line-height:1.5;">
-                        {_escape((summary_text or '').strip())}
-                      </div>
+                      {current_html}
                       <!-- SUMMARY_END -->
-                    
                       {''.join(sections_html)}
                       <p style="margin-top:20px; font-style:italic;">Exported from HR Dashboard</p>
                     </body>
                     </html>
                     """.strip()
-
-                                        
-                   
                 
-                    # Use download_button to actually trigger the browser download
-                    file_name = f"{_slug(cand)}-vs-{_slug(other)}.html"
+                    file_name = f"{_slug_local(cand)}-vs-{_slug_local(other)}.html"
                     clicked = st.download_button(
                         "💾 Save & Download (HTML)",
                         data=html_doc.encode("utf-8"),
                         file_name=file_name,
                         mime="text/html",
-                        key=f"dl-{_slug(cand)}-{_slug(other)}",
+                        key=f"dl-{_slug_local(cand)}-{_slug_local(other)}",
+                        help="Save the current draft and download it as an HTML file",
                     )
-        
-                    # Optional: also archive to Finished only when user clicks Download
                     if clicked:
                         from send_back import render_comparison_download
                         render_comparison_download(cand, other, html_doc)
                         st.success("Saved & ready to download.")
-                                
+                
+                            
+                # 4) Remove all compared candidates
+                with t3:
+                    if st.button(
+                        "🗑️ Remove all compared candidates",
+                        key=f"rm-all-{_slug_local(cand)}",
+                        help="Remove this candidate and everyone selected in Compare",
+                    ):
+                        _remove_and_refresh([cand] + others)  # assumes `others` is in scope as before
+                
+                # --- Editor appears below the toolbar once text exists ---
+                if st.session_state.get(editor_key):
+                    summary_text = st.text_area(
+                        "Cohesive summary",
+                        key=editor_key,
+                        height=300,
+                        help="Edit the generated draft before saving/downloading",
+                    )
+                else:
+                    st.info("Click **Generate cohesive summary** to create a draft.")
 
-            
-                    else:
-                        # Optional: allow override
-                        if st.button(
-                            "♻️ Regenerate anyway",
-                            key=f"regen-{cand}-{other}",
-                            on_click=partial(set_active, cand),
-                        ):
-                            # Clear session and (optionally) delete old blob; then rerun
-                            st.session_state.pop(agent_key, None)
-                            # If you want to delete the old blob too:
-                            # try: _archive_cc().delete_blob(compare_blob)
-                            # except Exception: pass
-                            st.experimental_rerun()
-
-                    
-                    # 'selected' already exists above as: selected = [cand] + others
-                    cols_rm = st.columns([1, 1])
-                    '''
-                    with cols_rm[0]:
-                        if st.button("🗑️ Remove JUST this candidate", key=f"rm-just-{_slug(cand)}"):
-                            _remove_and_refresh([cand])  # only the primary candidate in this expander
-                    '''
-                    with cols_rm[1]:
-                        # Removes the primary + all currently compared candidates in this expander
-                        if st.button("🗑️ Remove all compared candidates", key=f"rm-all-{_slug(cand)}"):
-                            _remove_and_refresh(selected)
-
-
+                
             try:
                 csvs = list_csvs_for_candidate(cand)
             except Exception as e:
@@ -579,4 +594,3 @@ else:
 
             athena_fit, matches, tp_all, cf_all = athena_fit_from_flags(athena_df)
             st.caption(f"Athena fit: {athena_fit:.1%}")
-
