@@ -70,7 +70,22 @@ def _download_blob_bytes(path: str) -> bytes | None:
 # We define a get client function 
 def get_cc():
     return make_bsc().get_container_client(CONTAINER)
-    
+st.session_state.setdefault("refresh_nonce", 0)
+
+@st.cache_data(ttl=5)
+def list_candidate_prefixes(_nonce: int) -> list[str]:
+    cc = get_cc()
+    prefixes = set()
+    for item in cc.walk_blobs(delimiter="/"):
+        if hasattr(item, "name") and item.name:
+            p = item.name.strip("/")
+            if p:
+                prefixes.add(p)
+    return sorted(prefixes)
+
+# use it:
+current_candidates = list_candidate_prefixes(st.session_state["refresh_nonce"])
+'''
 # We cache candidate data for 30 seconds so if anything changes in that 30 seconds it gets updated
 @st.cache_data(ttl=2)
 def list_candidate_prefixes() -> list[str]: # A list of strings 
@@ -83,7 +98,7 @@ def list_candidate_prefixes() -> list[str]: # A list of strings
                 prefixes.add(p)
                 
     return sorted(prefixes)
-    
+'''
 # Cache data for 30 seconds
 #@st.cache_data(ttl=600)
 def list_csvs_for_candidate(cand: str) -> list[str]:
