@@ -324,19 +324,13 @@ else:
                     # also archive the pretty HTML export
                     render_candidate_download(cand, full_html) # currently goes to Finished
                     st.success("Saved summary to dashboard and archived HTML.")
-
                 if st.button(
                     "🗑️ Remove from dashboard",
                     key=f"rm-dash-solo-{cand}",
                     on_click=partial(set_active, cand),
                 ):
-                    deleted_count, _ = delete_candidate_from_dashboard(cand)
-                    if deleted_count > 0:
-                        st.toast(f"Removed {cand} from dashboard ({deleted_count} files).", icon="✅")
-                    else:
-                        st.toast(f"No files found for {cand} under dashboard/", icon="⚠️")
-                    st.session_state.setdefault("removed_candidates", set()).add(cand)
-                    st.rerun()            
+                    _remove_and_refresh([cand])  # ← uses the helper that clears st.cache_data and reruns
+   
             else:
                 import compare as cmp
 
