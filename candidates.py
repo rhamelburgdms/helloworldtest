@@ -72,7 +72,7 @@ def get_cc():
     return make_bsc().get_container_client(CONTAINER)
     
 # We cache candidate data for 30 seconds so if anything changes in that 30 seconds it gets updated
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=2)
 def list_candidate_prefixes() -> list[str]: # A list of strings 
     cc = get_cc() # Grab the container client
     prefixes = set() # Store prefixes in an empty set, because "prefixes" are the file names
