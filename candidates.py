@@ -129,10 +129,6 @@ def list_candidates_from_dashboard(_bsc: BlobServiceClient, container: str) -> l
     cc = _bsc.get_container_client(container)  # use the param you passed in
     return sorted({b.name.split("/", 1)[0] for b in cc.walk_blobs(name_starts_with="", delimiter="/")})
 
-bsc = make_bsc()
-dash = os.getenv("CONTAINER", "dashboard")  # use uppercase key consistently
-all_candidates = list_candidates_from_dashboard(bsc, dash)
-
 # Here's where we build the download piece that makes it easy to paste into an email.
 def build_candidate_email_table(cand: str, use_edits: bool, edited_summary: str) -> str:
     # Load CSVs for the candidate
@@ -196,8 +192,7 @@ def build_candidate_email_table(cand: str, use_edits: bool, edited_summary: str)
     return html
     
 def _remove_and_refresh(cands: list[str]):
-    removed = []
-    missing = []
+    removed, missing = [], []
     for name in cands:
         try:
             deleted_count, _ = delete_candidate_from_dashboard(name)
@@ -213,14 +208,16 @@ def _remove_and_refresh(cands: list[str]):
         st.toast(f"Removed {len(removed)} candidate(s): {', '.join(removed)}", icon="✅")
     if missing:
         st.toast(f"No files found for: {', '.join(missing)}", icon="⚠️")
+
+    # Ensure no stale list survives
+    st.session_state.pop("candidates", None)
+
+    # Clear cached list_candidate_prefixes() and CSV loads
     st.cache_data.clear()
     st.rerun()
 
 st.title("Candidate Bank")
 st.caption("Expand each candidate to view data, make comparisons, and edit summaries.")
-# session bootstrap
-if "candidates" not in st.session_state:
-    st.session_state["candidates"] = list_candidate_prefixes()  # seed UI list
 
 # Track which expander should remain open across reruns
 if "open_cand" not in st.session_state:
@@ -237,7 +234,7 @@ if not current_candidates:
     st.info("No candidates are pending approval.")
 
 else:
-    for cand in candidates:
+    for cand in current_candidates:
         # keep this expander open if it was the last interacted one
         is_open = (st.session_state.active_cand == cand)
 
