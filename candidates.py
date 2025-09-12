@@ -227,7 +227,7 @@ if "open_cand" not in st.session_state:
 
 # List candidates
 # Always compute fresh (list_candidate_prefixes is @st.cache_data but you clear it on delete)
-current_candidates = list_candidate_prefixes()
+#current_candidates = list_candidate_prefixes()
 
 # Hide anything you just removed in this session (instant UX)
 current_candidates = [c for c in current_candidates if c not in st.session_state.removed_candidates]
@@ -327,80 +327,81 @@ else:
                     on_click=partial(set_active, cand),
                 ):
                     _remove_and_refresh([cand])  # ← uses the helper that clears st.cache_data and reruns
-                elif mode == 'Compare':
-                    import compare as cmp
-                    key_multi = f"cmp-multi-{cand}"
-                    others = st.multiselect(
-                        f"Compare {cand} with others",
-                        options=[c for c in current_candidates if c != cand],
-                        default=st.session_state.get(key_multi, []),
-                        key=key_multi,
-                        on_change=partial(set_active, cand),
-                    )
-                    if not others:
-                        st.info("Pick at least one other candidate to compare with this one.")
-                        continue
-                
-                    selected = [cand] + others
-                    ath_df = cmp.build_athena_table(selected)
-                    gen_df = cmp.build_gensos_table(selected)
-                
-                    if ath_df.empty and gen_df.empty:
-                        st.warning("No Athena/Genos data found for the selected candidates.")
-                        st.stop()
-                
-                    if not ath_df.empty:
-                        st.markdown("### Athena scores")
-                        st.dataframe(ath_df, use_container_width=True)
-                    if not gen_df.empty:
-                        st.markdown("### Genos bands")
-                        st.dataframe(gen_df, use_container_width=True)
-                
-                    other = others[0]
-                
-                    # ----- Build DF for agent (unchanged) -----
-                    import pandas as pd
-                    parts = []
-                    if ath_df is not None and not ath_df.empty:
-                        a = ath_df.drop(columns=["Top Performers"], errors="ignore").copy()
-                        a.insert(0, "Section", "Athena")
-                        parts.append(a)
-                    if gen_df is not None and not gen_df.empty:
-                        g = gen_df.copy()
-                        g.insert(0, "Section", "Genos")
-                        parts.append(g)
-                    df_agent = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
-                
-                    compare_blob = f"{_slug(cand)}_vs_{_slug(other)}_cohesive_summary.html"
-                    editor_key   = f"cmp-summary-text-{cand}-{other}"  # stores TEXT only
-                
-                    from send_back import load_summary_only
-                    if editor_key not in st.session_state:
-                        if _finished_exists(compare_blob):
-                            st.session_state[editor_key] = load_summary_only(compare_blob)
-                            st.info("Loaded existing cohesive summary text.")
-                        else:
-                            st.session_state[editor_key] = ""
-                
-                    pending_flag = f"pending_gen_{cand}_{other}"
-                    if st.session_state.get(pending_flag):
-                        with st.spinner("Comparing…"):
-                            out_text = compare_summaries_agent(cand=cand, other=other, df=df_agent)
-                            st.session_state[editor_key] = out_text
-                        st.session_state[pending_flag] = False
-                        st.toast("Draft generated — edit it below.", icon="📝")
-                
-                    # ---------- Editor FIRST so its value commits before any buttons ----------
-                    summary_text = st.text_area(
-                        "Cohesive summary",
-                        key=editor_key,
-                        height=300,
-                        help="Edit the generated draft before saving/downloading",
-                    )
-                
-                    # ---------- Toolbar ----------
-                    t1, t2, t3, t4 = st.columns([1.3, 1.6, 1.6, 1.3])
-                
+            elif mode == 'Compare':
+                import compare as cmp
+            
+                key_multi = f"cmp-multi-{cand}"
+                others = st.multiselect(
+                    f"Compare {cand} with others",
+                    options=[c for c in current_candidates if c != cand],
+                    default=st.session_state.get(key_multi, []),
+                    key=key_multi,
+                    on_change=partial(set_active, cand),
+                )
+                if not others:
+                    st.info("Pick at least one other candidate to compare with this one.")
+                    continue
+            
+                selected = [cand] + others
+                ath_df = cmp.build_athena_table(selected)
+                gen_df = cmp.build_gensos_table(selected)
+            
+                if ath_df.empty and gen_df.empty:
+                    st.warning("No Athena/Genos data found for the selected candidates.")
+                    st.stop()
+            
+                if not ath_df.empty:
+                    st.markdown("### Athena scores")
+                    st.dataframe(ath_df, use_container_width=True)
+                if not gen_df.empty:
+                    st.markdown("### Genos bands")
+                    st.dataframe(gen_df, use_container_width=True)
+            
+                other = others[0]
+            
+                # ----- Build DF for agent (unchanged) -----
+                import pandas as pd
+                parts = []
+                if ath_df is not None and not ath_df.empty:
+                    a = ath_df.drop(columns=["Top Performers"], errors="ignore").copy()
+                    a.insert(0, "Section", "Athena")
+                    parts.append(a)
+                if gen_df is not None and not gen_df.empty:
+                    g = gen_df.copy()
+                    g.insert(0, "Section", "Genos")
+                    parts.append(g)
+                df_agent = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+            
+                compare_blob = f"{_slug(cand)}_vs_{_slug(other)}_cohesive_summary.html"
+                editor_key   = f"cmp-summary-text-{cand}-{other}"  # stores TEXT only
+            
+                from send_back import load_summary_only
+                if editor_key not in st.session_state:
+                    if _finished_exists(compare_blob):
+                        st.session_state[editor_key] = load_summary_only(compare_blob)
+                        st.info("Loaded existing cohesive summary text.")
+                    else:
+                        st.session_state[editor_key] = ""
+            
+                pending_flag = f"pending_gen_{cand}_{other}"
+                if st.session_state.get(pending_flag):
+                    with st.spinner("Comparing…"):
+                        out_text = compare_summaries_agent(cand=cand, other=other, df=df_agent)
+                        st.session_state[editor_key] = out_text
+                    st.session_state[pending_flag] = False
+                    st.toast("Draft generated — edit it below.", icon="📝")
+            
+                # ---------- Editor FIRST so its value commits before any buttons ----------
+                summary_text = st.text_area(
+                    "Cohesive summary",
+                    key=editor_key,
+                    height=300,
+                    help="Edit the generated draft before saving/downloading",
+                )
+            
+                # ---------- Toolbar ----------
+                t1, t2, t3, t4 = st.columns([1.3, 1.6, 1.6, 1.3])
+
                     def _slug_local(s: str) -> str:
                         import re as _re
                         return _re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-")
