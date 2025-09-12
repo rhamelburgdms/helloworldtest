@@ -17,7 +17,7 @@ def _make_bsc() -> BlobServiceClient:
     return BlobServiceClient(account_url=f"https://{acct}.blob.core.windows.net", credential=cred)
 
 def _archive_cc():
-    CONTAINER = os.getenv("CONTAINER", "finished")
+    CONTAINER = os.getenv("FINISHED_CONTAINER", "finished")
     return _make_bsc().get_container_client(CONTAINER)
 
 def upload_text(path: str, text: str, *, content_type="text/html"):
