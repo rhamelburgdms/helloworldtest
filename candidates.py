@@ -388,11 +388,12 @@ else:
                 if clicked:
                     # persist the plain-text summary where the app reads it from
                     save_summary(cand, edited_summary)         # writes dashboard/{cand}/summary.txt
-               '''
+               
                 
                     # also archive the pretty HTML export
                     #render_candidate_download(cand, full_html) # currently goes to Finished
                     #st.success("Saved summary to dashboard and archived HTML.")
+                '''
                 if st.button(
                     "🗑️ Remove from dashboard",
                     key=f"rm-dash-solo-{cand}",
