@@ -327,7 +327,7 @@ else:
                     on_click=partial(set_active, cand),
                 ):
                     _remove_and_refresh([cand])  # ← uses the helper that clears st.cache_data and reruns
-                else:
+                elif mode == 'Compare':
                     import compare as cmp
                     key_multi = f"cmp-multi-{cand}"
                     others = st.multiselect(
@@ -339,7 +339,7 @@ else:
                     )
                     if not others:
                         st.info("Pick at least one other candidate to compare with this one.")
-                        st.stop()
+                        continue
                 
                     selected = [cand] + others
                     ath_df = cmp.build_athena_table(selected)
