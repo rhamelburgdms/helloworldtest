@@ -391,8 +391,8 @@ else:
                '''
                 
                     # also archive the pretty HTML export
-                    render_candidate_download(cand, full_html) # currently goes to Finished
-                    st.success("Saved summary to dashboard and archived HTML.")
+                    #render_candidate_download(cand, full_html) # currently goes to Finished
+                    #st.success("Saved summary to dashboard and archived HTML.")
                 if st.button(
                     "🗑️ Remove from dashboard",
                     key=f"rm-dash-solo-{cand}",
