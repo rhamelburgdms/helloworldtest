@@ -327,7 +327,169 @@ else:
                     on_click=partial(set_active, cand),
                 ):
                     _remove_and_refresh([cand])  # ← uses the helper that clears st.cache_data and reruns
-   
+                else:
+                    import compare as cmp
+                    key_multi = f"cmp-multi-{cand}"
+                    others = st.multiselect(
+                        f"Compare {cand} with others",
+                        options=[c for c in current_candidates if c != cand],
+                        default=st.session_state.get(key_multi, []),
+                        key=key_multi,
+                        on_change=partial(set_active, cand),
+                    )
+                    if not others:
+                        st.info("Pick at least one other candidate to compare with this one.")
+                        st.stop()
+                
+                    selected = [cand] + others
+                    ath_df = cmp.build_athena_table(selected)
+                    gen_df = cmp.build_gensos_table(selected)
+                
+                    if ath_df.empty and gen_df.empty:
+                        st.warning("No Athena/Genos data found for the selected candidates.")
+                        st.stop()
+                
+                    if not ath_df.empty:
+                        st.markdown("### Athena scores")
+                        st.dataframe(ath_df, use_container_width=True)
+                    if not gen_df.empty:
+                        st.markdown("### Genos bands")
+                        st.dataframe(gen_df, use_container_width=True)
+                
+                    other = others[0]
+                
+                    # ----- Build DF for agent (unchanged) -----
+                    import pandas as pd
+                    parts = []
+                    if ath_df is not None and not ath_df.empty:
+                        a = ath_df.drop(columns=["Top Performers"], errors="ignore").copy()
+                        a.insert(0, "Section", "Athena")
+                        parts.append(a)
+                    if gen_df is not None and not gen_df.empty:
+                        g = gen_df.copy()
+                        g.insert(0, "Section", "Genos")
+                        parts.append(g)
+                    df_agent = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+                
+                    compare_blob = f"{_slug(cand)}_vs_{_slug(other)}_cohesive_summary.html"
+                    editor_key   = f"cmp-summary-text-{cand}-{other}"  # stores TEXT only
+                
+                    from send_back import load_summary_only
+                    if editor_key not in st.session_state:
+                        if _finished_exists(compare_blob):
+                            st.session_state[editor_key] = load_summary_only(compare_blob)
+                            st.info("Loaded existing cohesive summary text.")
+                        else:
+                            st.session_state[editor_key] = ""
+                
+                    pending_flag = f"pending_gen_{cand}_{other}"
+                    if st.session_state.get(pending_flag):
+                        with st.spinner("Comparing…"):
+                            out_text = compare_summaries_agent(cand=cand, other=other, df=df_agent)
+                            st.session_state[editor_key] = out_text
+                        st.session_state[pending_flag] = False
+                        st.toast("Draft generated — edit it below.", icon="📝")
+                
+                    # ---------- Editor FIRST so its value commits before any buttons ----------
+                    summary_text = st.text_area(
+                        "Cohesive summary",
+                        key=editor_key,
+                        height=300,
+                        help="Edit the generated draft before saving/downloading",
+                    )
+                
+                    # ---------- Toolbar ----------
+                    t1, t2, t3, t4 = st.columns([1.3, 1.6, 1.6, 1.3])
+                
+                    def _slug_local(s: str) -> str:
+                        import re as _re
+                        return _re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-")
+                
+                    # Helper to build the HTML from current text + tables (same rendering as yours)
+                    def _build_compare_html(cand: str, other: str, text: str, ath_df: pd.DataFrame | None, gen_df: pd.DataFrame | None) -> str:
+                        from html import escape as _escape
+                        import re as _re
+                
+                        # sections
+                        sections_html = []
+                        if ath_df is not None and not ath_df.empty:
+                            sections_html.append("<h3>Athena scores</h3>" + ath_df.to_html(index=False, border=1, justify="left", escape=False))
+                        if gen_df is not None and not gen_df.empty:
+                            sections_html.append("<h3>Genos bands</h3>" + gen_df.to_html(index=False, border=1, justify="left", escape=False))
+                
+                        raw = (text or "").replace("\r\n", "\n")
+                        pattern = r'(?<![/\d])\b\d+\.\s+'  # robust inline numbered list
+                        matches = list(_re.finditer(pattern, raw))
+                        if len(matches) >= 2:
+                            before = raw[:matches[0].start()].strip()
+                            tail   = raw[matches[0].start():]
+                            items  = [p.strip() for p in _re.split(pattern, tail) if p.strip()]
+                            list_html = "<ol>" + "".join(f"<li>{_escape(it)}</li>" for it in items) + "</ol>"
+                            head_html = f'<div style="white-space: pre-wrap; line-height:1.5;">{_escape(before)}</div>' if before else ""
+                            current_html = head_html + list_html
+                        else:
+                            current_html = f'<div style="white-space: pre-wrap; line-height:1.5;">{_escape(raw.strip())}</div>'
+                
+                        # Convert **bold** to <strong> after escaping/building
+                        current_html = _re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", current_html)
+                
+                        html_doc = f"""
+                        <html>
+                        <body style="font-family: Arial, sans-serif; font-size: 14px; color: #222;">
+                          <h2>Cohesive Summary – {cand} vs {other}</h2>
+                          <!-- SUMMARY_START -->
+                          {current_html}
+                          <!-- SUMMARY_END -->
+                          {''.join(sections_html)}
+                          <p style="margin-top:20px; font-style:italic;">Exported from HR Dashboard</p>
+                        </body>
+                        </html>
+                        """.strip()
+                        return html_doc
+                
+                    # 1) Generate (disabled once text exists)
+                    with t1:
+                        if not st.session_state.get(editor_key):
+                            if st.button(
+                                "✨ Generate cohesive summary",
+                                key=f"gen-{cand}-{other}",
+                                help="Draft a first pass using the comparison tables",
+                                on_click=partial(set_active, cand),
+                            ):
+                                st.session_state[pending_flag] = True
+                                st.rerun()
+                        else:
+                            st.button("✨ Generate cohesive summary", disabled=True, key=f"gen-disabled-{cand}-{other}")
+                
+                    # 2) SAVE (form) → persist + stash last_html
+                    with t2:
+                        with st.form(f"cmp_save_form_{_slug_local(cand)}_{_slug_local(other)}", clear_on_submit=False):
+                            save_clicked = st.form_submit_button("💾 Save updated comparison")
+                            if save_clicked:
+                                html_doc = _build_compare_html(cand, other, st.session_state.get(editor_key, ""), ath_df, gen_df)
+                
+                                # Archive/upload first
+                                from send_back import render_comparison_download
+                                render_comparison_download(cand, other, html_doc)
+                
+                                # Then stash the exact saved payload for deterministic download
+                                st.session_state[f"last_cmp_html_{cand}_{other}"] = html_doc
+                                st.success("Saved comparison HTML.")
+                
+                    # 3) DOWNLOAD always serves the *last saved* payload
+                    with t3:
+                        file_name = f"{_slug_local(cand)}-vs-{_slug_local(other)}.html"
+                        last_html = st.session_state.get(f"last_cmp_html_{cand}_{other}")
+                        st.download_button(
+                            "📄 Download last saved HTML",
+                            data=(last_html or _build_compare_html(cand, other, st.session_state.get(editor_key, ""), ath_df, gen_df)).encode("utf-8"),
+                            file_name=file_name,
+                            mime="text/html",
+                            key=f"dl-last-{_slug_local(cand)}-{_slug_local(other)}",
+                            help="Downloads the most recently saved comparison HTML",
+                        )
+
+            '''
             else:
                 import compare as cmp
 
@@ -525,7 +687,7 @@ else:
                     )
                 else:
                     st.info("Click **Generate cohesive summary** to create a draft.")
-
+            '''
                 
             try:
                 csvs = list_csvs_for_candidate(cand)
