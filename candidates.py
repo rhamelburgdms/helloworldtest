@@ -254,8 +254,74 @@ else:
             if mode == "Solo view":
                 # OPTIONAL: clear compare picks when leaving Compare
                 st.session_state.pop(f"cmp-multi-{cand}", None)
+            # === SOLO VIEW: edit -> SAVE (form) -> then download the exact saved payload ===
 
-            
+                state_key = f"solo-ta-{cand}"
+                edited_summary = st.text_area(
+                    f"Edit Summary – {cand}",
+                    value=st.session_state.get(state_key, load_summary(cand)),
+                    height=260,
+                    key=state_key,
+                    on_change=partial(set_active, cand),
+                )
+                st.session_state[f"edited_summary_{cand}"] = edited_summary
+                
+                # Load CSVs (safe if missing) — keep your existing table code
+                try:
+                    csvs = list_csvs_for_candidate(cand)
+                except Exception as e:
+                    st.error(f"Failed to list CSVs for {cand}: {e}")
+                    csvs = []
+                
+                athena_path = next((p for p in csvs if re.search(r"(athena|athen[_-]?vs[_-]?top)", p, re.I)), None)
+                genos_path  = next((p for p in csvs if "genos" in p.lower()), None)
+                
+                athena_df = load_csv(athena_path) if athena_path else None
+                genos_df  = load_csv(genos_path)  if genos_path  else None
+                
+                if (athena_df is None or athena_df.empty) and (genos_df is None or genos_df.empty):
+                    st.info("No Athena or Genos tables found for this candidate.")
+                else:
+                    if athena_df is not None and not athena_df.empty:
+                        st.subheader("Athena vs Top Performers", anchor=False)
+                        st.dataframe(athena_df, use_container_width=True)
+                    if genos_df is not None and not genos_df.empty:
+                        st.subheader("Genos Emotional Intelligence Scores", anchor=False)
+                        st.dataframe(genos_df, use_container_width=True)
+                
+                # Save first (form), then expose a download bound to the saved payload
+                with st.form(f"save_form_{cand}", clear_on_submit=False):
+                    submitted = st.form_submit_button("💾 Save updated summary")
+                    if submitted:
+                        # 1) Persist the plain-text summary to dashboard/{cand}/summary.txt
+                        save_summary(cand, edited_summary)
+                
+                        # 2) Build HTML directly from the edited text in memory (no blob reads)
+                        html = build_candidate_email_table(
+                            cand=cand,
+                            use_edits=True,
+                            edited_summary=edited_summary,
+                        )
+                
+                        # 3) Archive the HTML to the finished container (upload can take time, that's fine)
+                        render_candidate_download(cand, html)
+                
+                        # 4) Stash the exact payload we just saved/archived for a guaranteed-correct download
+                        st.session_state[f"last_html_{cand}"] = html
+                
+                        st.success("Saved to dashboard and archived HTML.")
+                
+                # Outside the form: always offer the **last saved** HTML for download
+                if html := st.session_state.get(f"last_html_{cand}"):
+                    st.download_button(
+                        "📄 Download last saved HTML",
+                        data=html.encode("utf-8"),
+                        file_name=f"{cand}_summary.html",
+                        mime="text/html",
+                        key=f"dl-last-{cand}",
+                    )
+
+            '''
                 edited_summary = st.text_area(
                     f"Edit Summary – {cand}",
                     value=load_summary(cand),
@@ -322,6 +388,7 @@ else:
                 if clicked:
                     # persist the plain-text summary where the app reads it from
                     save_summary(cand, edited_summary)         # writes dashboard/{cand}/summary.txt
+               '''
                 
                     # also archive the pretty HTML export
                     render_candidate_download(cand, full_html) # currently goes to Finished
