@@ -16,7 +16,13 @@ def _make_bsc() -> BlobServiceClient:
     cred = DefaultAzureCredential(exclude_shared_token_cache_credential=True)
     return BlobServiceClient(account_url=f"https://{acct}.blob.core.windows.net", credential=cred)
 
+def _dash_cc():
+    """Client for the editable dashboard container."""
+    CONTAINER = os.getenv("CONTAINER", "dashboard")
+    return _make_bsc().get_container_client(CONTAINER)
+
 def _archive_cc():
+    """Client for the finished/archive container."""
     CONTAINER = os.getenv("FINISHED_CONTAINER", "finished")
     return _make_bsc().get_container_client(CONTAINER)
 
@@ -28,21 +34,15 @@ def upload_text(path: str, text: str, *, content_type="text/html"):
         content_settings=ContentSettings(content_type=content_type),
     )
 
-
 def _slug(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", s.strip().lower()).strip("-")
 
 def _safe_join(prefix: str, name: str) -> str:
-    """Join a virtual folder with a filename safely for blob paths."""
     prefix = prefix.strip("/")
-    name = Path(name).name  # prevent path traversal
+    name = Path(name).name
     return f"{prefix}/{name}" if prefix else name
 
 def _resolve_by_basename(basename: str) -> str | None:
-    """
-    Search the Finished container for a blob whose basename matches.
-    Return its full blob path or None.
-    """
     cc = _archive_cc()
     target = Path(basename).name.lower()
     for item in cc.walk_blobs(name_starts_with=""):
@@ -52,24 +52,21 @@ def _resolve_by_basename(basename: str) -> str | None:
     return None
 
 def render_candidate_download(cand: str, solo_html: str):
-    # finished/{cand}/email-ready/{slug(cand)}_summary.html
     folder = f"{cand}/exports"
     file_name = f"{_slug(cand)}_summary.html"
     archive_path = _safe_join(folder, file_name)
-
     try:
         upload_text(archive_path, solo_html, content_type="text/html")
         st.toast(f"Archived to Blob: {archive_path}", icon="✅")
-        st.session_state.setdefault("removed_candidates", set()).add(cand)
+        # Do NOT auto-hide; keep candidate visible after save+download
+        # st.session_state.setdefault("removed_candidates", set()).add(cand)
     except Exception as e:
         st.warning(f"Downloaded locally, but failed to archive to Blob: {e}")
 
 def render_comparison_download(cand: str, other: str, html: str):
-    # Save under BOTH candidates so the file is easy to find in either folder
     base_name = f"{_slug(cand)}-vs-{_slug(other)}.html"
     cand_path  = _safe_join(f"{cand}/comparisons", base_name)
     other_path = _safe_join(f"{other}/comparisons", base_name)
-
     try:
         upload_text(cand_path, html, content_type="text/html")
         upload_text(other_path, html, content_type="text/html")
@@ -77,51 +74,34 @@ def render_comparison_download(cand: str, other: str, html: str):
     except Exception as e:
         st.warning(f"Downloaded locally, but failed to archive comparison: {e}")
 
-
 def load_summary_only(blob_name: str) -> str:
-    """
-    Loads an HTML comparison (or solo) file from Finished and extracts only the
-    cohesive summary text. Accepts either a full blob path or just a basename.
-    Prefers <!-- SUMMARY_START/END --> markers; falls back to #summary-text div,
-    then to the pre-<h3> section.
-    """
     cc = _archive_cc()
     path = blob_name.strip("/")
-
-    # If caller passed just a basename (no '/'), resolve it anywhere in Finished
     if "/" not in path:
         resolved = _resolve_by_basename(path)
         if not resolved:
             return ""
         path = resolved
-
     try:
         html = cc.download_blob(path).readall().decode("utf-8", "replace")
-
-        # Prefer explicit markers we add when saving
         m = re.search(r"<!--\s*SUMMARY_START\s*-->(.*?)<!--\s*SUMMARY_END\s*-->", html, re.S|re.I)
         if not m:
-            # Fallback: <div id="summary-text">...</div>
             m = re.search(r'<div[^>]+id=["\']summary-text["\'][^>]*>(.*?)</div>', html, re.S|re.I)
-
         if m:
             frag = m.group(1)
-            frag = re.sub(r"<br\s*/?>", "\n", frag, flags=re.I)  # keep line breaks
-            frag = re.sub(r"<[^>]+>", "", frag)                 # strip tags
+            frag = re.sub(r"<br\s*/?>", "\n", frag, flags=re.I)
+            frag = re.sub(r"<[^>]+>", "", frag)
             return _unescape(frag).strip()
-
-        # Last resort: everything before the first <h3>
         head = re.split(r"<h3", html, maxsplit=1, flags=re.I)[0]
         head = re.sub(r"<[^>]+>", "", head)
         return _unescape(head).strip()
     except Exception:
         return ""
-def delete_candidate_from_dashboard(cand: str) -> tuple[int, list[str]]:
-    container = os.getenv("CONTAINER", "dashboard")
-    cc = make_bsc().get_container_client(container)
-    prefix = f"{cand.rstrip('/')}/"
 
-    # list everything under the prefix
+def delete_candidate_from_dashboard(cand: str) -> tuple[int, list[str]]:
+    """Remove all blobs for this candidate from the dashboard container."""
+    cc = _dash_cc()  # fixed: use dashboard container + correct helper
+    prefix = f"{cand.rstrip('/')}/"
     names = [b.name for b in cc.list_blobs(name_starts_with=prefix)]
     deleted, errors = 0, []
     for name in names:
@@ -131,26 +111,3 @@ def delete_candidate_from_dashboard(cand: str) -> tuple[int, list[str]]:
         except Exception as e:
             errors.append(f"{name}: {e}")
     return deleted, errors
-
-'''
-def delete_candidate_from_dashboard(cand: str, container: str | None = None) -> tuple[int, list[str]]:
-    """
-    Permanently remove all blobs for a candidate from the dashboard container.
-    Returns (count_deleted, list_of_deleted_blob_names).
-    """
-    container = container or os.getenv("CONTAINER", "dashboard")
-    cc = _make_bsc().get_container_client(container)
-
-    prefix = cand.rstrip("/") + "/"
-    blobs_to_delete = [b.name for b in cc.list_blobs(name_starts_with=prefix)]
-
-    deleted = 0
-    for blob_name in blobs_to_delete:
-        try:
-            cc.delete_blob(blob_name)
-            deleted += 1
-        except Exception as e:
-            st.warning(f"Failed to delete {blob_name}: {e}")
-
-    return deleted, blobs_to_delete
-'''
