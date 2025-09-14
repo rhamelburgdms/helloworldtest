@@ -70,7 +70,7 @@ def render_comparison_download(cand: str, other: str, html: str):
     try:
         upload_text(cand_path, html, content_type="text/html")
         upload_text(other_path, html, content_type="text/html")
-        st.toast(f"Comparison archived:\n- {cand_path}\n- {other_path}", icon="✅")
+        st.toast("Comparison archived")
     except Exception as e:
         st.warning(f"Downloaded locally, but failed to archive comparison: {e}")
 
