@@ -10,7 +10,7 @@ from send_back import render_candidate_download, delete_candidate_from_dashboard
 st.set_page_config(page_title="Candidate Page", page_icon="🧩", layout="wide")
 from send_back import _archive_cc 
 import re
- 
+
 GENOS_LEGEND_HTML = """
 <div style="margin-top:8px; padding:10px 12px; border:1px solid #eee; border-radius:8px; background:#fafafa; font-size:13px; line-height:1.5;">
   <strong>Genos Band Mapping</strong><br>
@@ -612,12 +612,27 @@ else:
                         st.dataframe(df_one, height=h, use_container_width=True)
                         if title == "Genos Report":
                             st.markdown(GENOS_LEGEND_HTML, unsafe_allow_html=True)
-            
+                    file_name = f"{_slug(cand)}-summary.html"
+                    solo_html = _build_solo_html(
+                        cand,
+                        st.session_state.get(sum_key, ""),     # the Solo summary text shown above
+                        athena_df,                             # Solo Athena df (may be None)
+                        (genos_view if (genos_view is not None and not genos_view.empty) else genos_df),
+                    )
+                    st.download_button(
+                        "📄 Download summary HTML",
+                        data=solo_html.encode("utf-8"),
+                        file_name=file_name,
+                        mime="text/html",
+                        key=f"dl-solo-{_slug(cand)}",
+                        use_container_width=True,
+                    )
                 # Remove from dashboard
                 if st.button(
                     "🗑️ Remove from dashboard",
                     key=f"rm-dash-solo-{cand}",
                     on_click=partial(set_active, cand),
+                    use_container_width=True,
                 ):
                     _remove_and_refresh([cand])
 
@@ -780,24 +795,14 @@ else:
                             st.success("Saved comparison HTML.")
                 
                     with c5:
-                          
-                        file_name = f"{_slug(cand)}-summary.html"
-                        solo_html  = _build_solo_html(
-                            cand,
-                            st.session_state.get(editor_key, ""),
-                            ath_df,  # <-- use your Solo Athena df variable
-                            gen_df,  # <-- use your Solo Genos df variable
-                        )
-                        
+                        file_name = f"{_slug(cand)}-vs-{_slug(other)}.html"
+                        last_html = st.session_state.get(f"last_cmp_html_{cand}_{other}")
                         st.download_button(
-                            "📄 Download summary HTML",
-                            data=solo_html.encode("utf-8"),
-                            file_name=file_name,
-                            mime="text/html",
-                            key=f"dl-solo-{_slug(cand)}",
-                            use_container_width=True,
+                            "📄 Download last saved HTML",
+                            data=(last_html or _build_compare_html(cand, other, st.session_state.get(editor_key, ""), ath_df, gen_df)).encode("utf-8"),
+                            file_name=file_name, mime="text/html", use_container_width=True,
+                            key=f"dl-last-{_slug(cand)}-{_slug(other)}",
                         )
-
                 
                     if st.session_state[open_key]:
                         edited = st.text_area(
