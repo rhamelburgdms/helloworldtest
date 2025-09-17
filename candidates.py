@@ -10,7 +10,7 @@ from send_back import render_candidate_download, delete_candidate_from_dashboard
 st.set_page_config(page_title="Candidate Page", page_icon="🧩", layout="wide")
 from send_back import _archive_cc 
 import re
-
+ 
 GENOS_LEGEND_HTML = """
 <div style="margin-top:8px; padding:10px 12px; border:1px solid #eee; border-radius:8px; background:#fafafa; font-size:13px; line-height:1.5;">
   <strong>Genos Band Mapping</strong><br>
