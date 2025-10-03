@@ -10,6 +10,7 @@ from send_back import render_candidate_download, delete_candidate_from_dashboard
 st.set_page_config(page_title="Candidate Page", page_icon="🧩", layout="wide")
 from send_back import _archive_cc 
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 GENOS_LEGEND_HTML = """
 <div style="margin-top:8px; padding:10px 12px; border:1px solid #eee; border-radius:8px; background:#fafafa; font-size:13px; line-height:1.5;">
@@ -168,6 +169,43 @@ def save_summary(cand: str, text: str):
 def list_candidates_from_dashboard(_bsc: BlobServiceClient, container: str) -> list[str]:
     cc = _bsc.get_container_client(container)  # use the param you passed in
     return sorted({b.name.split("/", 1)[0] for b in cc.walk_blobs(name_starts_with="", delimiter="/")})
+from concurrent.futures import ThreadPoolExecutor
+
+@st.cache_data(ttl=30)
+def preload_candidate_data(cands: list[str]):
+    out = {}
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futures = {ex.submit(list_csvs_for_candidate, c): c for c in cands}
+        for fut, cand in futures.items():
+            try:
+                csvs = fut.result()
+                athena_path = next((p for p in csvs if "athena" in p.lower()), None)
+                genos_path  = next((p for p in csvs if "genos" in p.lower()), None)
+                athena_df   = load_csv(athena_path) if athena_path else None
+                genos_df    = load_csv(genos_path) if genos_path else None
+
+                # preload summary.txt
+                summary = ""
+                try:
+                    b = _download_blob_bytes(f"{cand.rstrip('/')}/summary.txt")
+                    if b:
+                        summary = b.decode("utf-8", errors="replace")
+                except Exception:
+                    pass
+
+                out[cand] = {
+                    "csvs": csvs,
+                    "athena_df": athena_df,
+                    "genos_df": genos_df,
+                    "summary": summary,        # include it
+                }
+            except Exception:
+                out[cand] = {"csvs": [], "athena_df": None, "genos_df": None, "summary": ""}
+    return out
+
+
+# call once
+preloaded = preload_candidate_data(current_candidates)
 
 # Here's where we build the download piece that makes it easy to paste into an email.
 def build_candidate_email_table(cand: str, use_edits: bool, edited_summary: str) -> str:
@@ -240,7 +278,8 @@ def open_editor(cand: str):
 
     # Make sure preview has something (first run)
     if sum_key not in st.session_state:
-        st.session_state[sum_key] = load_summary(cand) or ""
+        st.session_state[sum_key] = data.get("summary", "") or ""
+
 
     # Seed the editor from the preview so it opens with exactly what was shown
     st.session_state[editor_key] = st.session_state.get(sum_key, "")
@@ -363,44 +402,87 @@ def display_name(s: str) -> str:
 def athena_fit_rowwise(df: pd.DataFrame) -> tuple[float, list[dict]]:
     if df is None or df.empty:
         return 0.0, []
+
     cols = {c.strip().lower(): c for c in df.columns}
     tp_col = cols.get("top performers")
     cf_col = cols.get("candidate value")
     trait_col = cols.get("trait")
     if not tp_col or not cf_col:
         return 0.0, []
-    def _split_flags(v):
-        if v is None or (isinstance(v, float) and pd.isna(v)):
-            return set()
+
+    # Define an order for the ratings
+    RANKING = {
+        "poor": 1,
+        "satisfactory": 2,
+        "excellent": 3,
+        "unique + excellent": 4,
+    }
+
+    def _normalize(v):
+        if not v or (isinstance(v, float) and pd.isna(v)):
+            return []
         if isinstance(v, str):
-            parts = _re.split(r"[;,/|\n]+", v)
+            parts = re.split(r"[;,/|\n]+", v)
         else:
             parts = [str(v)]
+    
         tokens = []
-        for p in parts:
-            p = p.strip().lower()
-            if p:
-                tokens.extend([t.strip() for t in p.split("+") if t.strip()])
-        return set(tokens)
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            for t in part.split("+"):
+                t = t.strip().lower()
+                if t:
+                    tokens.append(t)
+        return tokens
+
 
     num = den = 0
     details = []
+
     for _, r in df.iterrows():
-        tp = _split_flags(r.get(tp_col))
-        cf = _split_flags(r.get(cf_col))
-        if not tp:
+        tp_vals = _normalize(r.get(tp_col))
+        cf_vals = _normalize(r.get(cf_col))
+
+        if not tp_vals:
             continue
-        m = tp & cf
-        num += len(m)
-        den += len(tp)
+
+        row_fits = []
+        row_den = len(tp_vals)
+
+        for tp in tp_vals:
+            tp_rank = RANKING.get(tp, 0)
+            # candidate is "fit" if any of their ratings >= tp rating
+            fit = any(RANKING.get(cf, 0) >= tp_rank for cf in cf_vals)
+            row_fits.append(fit)
+            if fit:
+                num += 1
+            den += 1
+
         details.append({
             "Trait": (r.get(trait_col) if trait_col else ""),
-            "Top Performers (parsed)": sorted(tp),
-            "Candidate Value (parsed)": sorted(cf),
-            "Matches": sorted(m),
-            "Row fit": (len(m) / len(tp)) if tp else 0.0,
+            "Top Performers": tp_vals,
+            "Candidate Value": cf_vals,
+            "Row fits": row_fits,
+            "Row fit %": sum(row_fits) / row_den if row_den else 0.0,
         })
+
     return (num / den if den else 0.0), details
+
+def _value_by_trait(df, trait_name, value_col="Candidate Value"):
+    if df is None or df.empty:
+        return None
+    # normalize
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    if "Trait" not in df.columns or value_col not in df.columns:
+        return None
+    m = df["Trait"].astype(str).str.strip().str.casefold() == str(trait_name).strip().casefold()
+    if not m.any():
+        return None
+    v = df.loc[m, value_col].iloc[0]
+    return None if pd.isna(v) else str(v).strip()
    
 def _remove_and_refresh(cands: list[str]):
     removed, missing = [], []
@@ -446,6 +528,12 @@ if not current_candidates:
 
 else:
     for cand in current_candidates:
+        data      = preloaded.get(cand, {})
+        csvs      = data.get("csvs", [])
+        athena_df = data.get("athena_df")
+        genos_df  = data.get("genos_df")
+
+
         # keep this expander open if it was the last interacted one
         is_open = (
             st.session_state.get("active_cand") == cand
@@ -506,19 +594,40 @@ else:
                         save_clicked = st.form_submit_button("💾 Save updated summary", use_container_width=True)
                         if save_clicked:
                             new_text = st.session_state.get(editor_key, "")
-                            # update preview + persist
+                    
+                            # update preview + persist to DASHBOARD
                             st.session_state[sum_key] = new_text
                             save_summary(cand, new_text)
-                            html = build_candidate_email_table(cand=cand, use_edits=True, edited_summary=new_text)
+                    
+                            # build HTML + keep for download
+                            html = build_candidate_email_table(
+                                cand=cand, use_edits=True, edited_summary=new_text
+                            )
                             render_candidate_download(cand, html)
                             st.session_state[f"last_html_{cand}"] = html
-                            st.success("Saved to dashboard and archived HTML.")
                     
-                            # close editor and keep this expander open
+                            # archive both HTML and plain text to FINISHED
+                            try:
+                                cc = _archive_cc()  # finished container client
+                                cc.upload_blob(
+                                    f"solo/{_slug(cand)}.html",
+                                    html.encode("utf-8"),
+                                    overwrite=True,
+                                    content_settings=ContentSettings(content_type="text/html"),
+                                )
+                                cc.upload_blob(
+                                    f"solo/{_slug(cand)}_summary.txt",
+                                    (new_text or "").encode("utf-8"),
+                                    overwrite=True,
+                                    content_settings=ContentSettings(content_type="text/plain"),
+                                )
+                                st.toast("Saved and archived to ‘finished’.", icon="📦")
+                            except Exception as e:
+                                st.warning(f"Saved, but archiving to 'finished' failed: {e}")
+                    
+                            # close editor, keep expander open, and refresh UI
                             st.session_state[edit_key] = False
                             st.session_state.active_cand = cand
-                    
-                            # force the UI to re-evaluate the branch now (no second click)
                             st.rerun()
 
 
@@ -528,53 +637,163 @@ else:
 
 
             
-                try:
-                    csvs = list_csvs_for_candidate(cand)
-                except Exception as e:
-                    st.error(f"Failed to list CSVs for {cand}: {e}")
-                    csvs = []
-            
-                athena_path = next((p for p in csvs if re.search(r"(athena|athen[_-]?vs[_-]?top)", p, re.I)), None)
-                genos_path  = next((p for p in csvs if "genos" in p.lower()), None)
-            
-                athena_df = load_csv(athena_path) if athena_path else None
-                genos_df  = load_csv(genos_path)  if genos_path  else None
-            
+                # --- headline metrics (row-oriented CSVs) ---
+                echelon_val = _value_by_trait(athena_df, "Echelon Scores")     # e.g., "1 / 1"
+                global_val  = _value_by_trait(athena_df, "Global Spread")      # e.g., "Excellent"
+                
+                st.markdown("""
+                <style>
+                .kcards{display:flex;flex-direction:column;gap:8px;}
+                .kcard{border:1px solid var(--element-border-color);border-radius:10px;padding:10px 12px;}
+                .klabel{font-size:.82rem;opacity:.8;margin-bottom:2px;}
+                .kvalue{font-weight:600;font-size:1.05rem;}
+                </style>
+                """, unsafe_allow_html=True)
+                
+                def stat_card(label: str, value: str):
+                    st.markdown(f"""
+                    <div class="kcard">
+                      <div class="klabel">{label}</div>
+                      <div class="kvalue">{value}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                # Athena Fit (unchanged, but now shown after the two metrics)
                 if athena_df is not None and not athena_df.empty:
-                    athena_fit, _row_details = athena_fit_rowwise(athena_df)
-                    st.markdown(f"### Athena Fit: **{athena_fit:.1%}**")
+                    athena_fit_ratio, _row_details = athena_fit_rowwise(athena_df)
+                    athena_fit = athena_fit_ratio * 100  # convert to percentage
+                else:
+                    athena_fit = None
+
+                    
+                import streamlit as st
+                import re
+                
+                st.markdown("""
+                <style>
+                .ks-card{
+                  border:1px solid var(--element-border-color);
+                  border-radius:16px; padding:16px 18px;
+                  background: var(--background-color);
+                  box-shadow: 0 1px 6px rgba(0,0,0,.06);
+                }
+                .ks-head{
+                  display:flex; align-items:center; gap:12px;
+                  font-size:1.0rem; opacity:.75; margin-bottom:10px;
+                }
+                .ks-ico{ font-size:1.6rem; line-height:1; }
+                .ks-val{ font-size:2.0rem; font-weight:800; letter-spacing:.2px; }
+                .ks-pill{
+                  display:inline-block; padding:6px 12px; border-radius:999px;
+                  border:1px solid var(--element-border-color);
+                  font-weight:700; font-size:1.05rem;
+                }
+                .ks-prog{
+                  border:1px solid var(--element-border-color);
+                  border-radius:999px;
+                  height:16px;
+                  overflow:hidden;
+                }
+                .ks-bar{
+                  height:100%;
+                  background:#ef4444;  /* red */
+                }
+                .ks-sub{
+                  font-size:.95rem;
+                  opacity:.75;
+                  margin-bottom:8px;
+                }
+                </style>
+                """, unsafe_allow_html=True)
+
+                def card(label: str, value_html: str, icon=""):
+                    st.markdown(f"""
+                    <div class="ks-card">
+                      <div class="ks-head"><span class="ks-ico">{icon}</span><span>{label}</span></div>
+                      <div class="ks-val">{value_html}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                def band_card(label: str, band_text: str | None, icon=""):
+                    text = (band_text or "—").strip()
+                    card(label, f'<span class="ks-pill">{text}</span>', icon)
+                
+                import html  # at top of file
+
+                def progress_card(label: str, pct: float | None, icon: str = "", tooltip: str | None = None):
+                    # clamp/normalize percent
+                    if pct is not None:
+                        pct = max(0, min(100, float(pct)))
+                
+                    # attach tooltip to the whole card so hovering anywhere shows it
+                    title_attr = f' title="{html.escape(tooltip)}"' if tooltip else ""
+                
+                    if pct is None:
+                        st.markdown(f"""
+                        <div class="ks-card"{title_attr}>
+                          <div class="ks-head"><span class="ks-ico">{icon}</span><span>{html.escape(label)}</span></div>
+                          <div class="ks-val">—</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        return
+                
+                    st.markdown(f"""
+                    <div class="ks-card"{title_attr}>
+                      <div class="ks-head"><span class="ks-ico">{icon}</span><span>{html.escape(label)}</span></div>
+                      <div class="ks-sub">{int(pct)}%</div>
+                      <div class="ks-prog"><div class="ks-bar" style="width:{pct}%"></div></div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                FIT_TIP = (
+    "Athena Fit = % of traits where the candidate’s rating is ≥ the Top Performers’ rating.\n"
+    "Examples: TP=Satisfactory & Candidate=Excellent → counts as fit;\n "
+    "TP=Excellent & Candidate=Satisfactory → not fit."
+                )
+                
+                c1, c2, c3 = st.columns(3)
+                with c1: card("Echelon", f"{echelon_val or '—'}", "🔰")
+                with c2: band_card("Global", global_val, "🌐")
+                with c3: progress_card("Top Performer Fit", athena_fit, "🎯", tooltip=FIT_TIP)
+            
+                
             
                 if (athena_df is None or athena_df.empty) and (genos_df is None or genos_df.empty):
                     st.info("No Athena or Genos tables found for this candidate.")
                 else:
                     # Compact Genos view (no duplicate columns, no long Interpretation)
+                    # Compact Genos view (preserve Band if present)
                     genos_view = None
                     if genos_df is not None and not genos_df.empty:
                         genos_view = genos_df.copy()
+                    
                         # normalize headers & drop duplicate names
                         genos_view.columns = pd.Index([str(c).strip() for c in genos_view.columns])
                         genos_view = genos_view.loc[:, ~genos_view.columns.duplicated()]
-                        # remove any existing 'Band' (case-insensitive)
-                        band_cols = [c for c in genos_view.columns if str(c).lower() == "band"]
-                        if band_cols:
-                            genos_view = genos_view.drop(columns=band_cols)
-                        # choose a numeric score column to map → band
-                        possible_scores = [c for c in genos_view.columns
-                                           if str(c).lower() in ("score", "percentile", "genos score", "overall score")]
-                        score_col = next(iter(possible_scores), None)
-                        if score_col is not None:
-                            v = pd.to_numeric(genos_view[score_col], errors="coerce")
-                            bins   = [0, 20, 40, 60, 80, 100]
-                            labels = ["Very Low", "Low", "Average", "High", "Very High"]
-                            genos_view["Band"] = pd.cut(v, bins=bins, labels=labels, include_lowest=True)
-                        # drop the long text column if present (case-insensitive)
-                        interp_cols = [c for c in genos_view.columns if str(c).lower() == "interpretation"]
-                        if interp_cols:
-                            genos_view = genos_view.drop(columns=interp_cols)
-                        # keep concise columns if available
-                        preferred = [c for c in ["Trait", score_col, "Band"] if c and c in genos_view.columns]
+                    
+                        # keep existing Band if it exists; only compute if missing
+                        has_band = any(str(c).strip().lower() == "band" for c in genos_view.columns)
+                        if not has_band:
+                            # try to compute from a numeric column if available
+                            possible_scores = [c for c in genos_view.columns
+                                               if str(c).strip().lower() in ("raw score", "score", "percentile",
+                                                                             "genos score", "overall score")]
+                            score_col = next(iter(possible_scores), None)
+                            if score_col is not None:
+                                v = pd.to_numeric(genos_view[score_col], errors="coerce")
+                                bins   = [0, 20, 40, 60, 80, 100]
+                                labels = ["Very Low", "Low", "Average", "High", "Very High"]
+                                genos_view["Band"] = pd.cut(v, bins=bins, labels=labels, include_lowest=True)
+                    
+                        # drop any long interpretation column if present
+                        genos_view = genos_view.drop(columns=[c for c in genos_view.columns
+                                                              if str(c).strip().lower() == "interpretation"],
+                                                     errors="ignore")
+                    
+                        # prefer your CSV schema: Measure, Raw Score, Band Range, Band
+                        preferred = [c for c in ["Measure", "Raw Score", "Band Range", "Band"] if c in genos_view.columns]
                         if preferred:
                             genos_view = genos_view[preferred]
+
             
                     # Side-by-side tables
                     GENOS_LEGEND_HTML = """
@@ -639,18 +858,9 @@ else:
                 
             elif mode == "Compare":
                 import compare as cmp
-                
+            
                 key_multi = f"cmp-multi-{cand}"
-
-                # Build options for "others"
                 options = [c for c in current_candidates if c != cand]
-                
-                # Seed + sanitize session value so it never contains removed candidates
-                if key_multi not in st.session_state:
-                    st.session_state[key_multi] = []
-                st.session_state[key_multi] = [c for c in st.session_state[key_multi] if c in options]
-                
-                # Use key only (no default=) so the sanitized state is the source of truth
                 others = st.multiselect(
                     f"Compare {display_name(cand)} with others",
                     options=options,
@@ -658,168 +868,155 @@ else:
                     key=key_multi,
                     on_change=partial(set_active, cand),
                 )
-
-
+            
                 if not others:
                     st.info("You haven’t selected any candidates yet.")
                     st.stop()
-                
+            
+                # Group display + slug for keys/filenames
+                others_title = ", ".join(display_name(o) for o in others)       # e.g., "Jane Doe, Bob Lee"
+                others_slug  = "-and-".join(_slug(o) for o in others)           # e.g., "jane-doe-and-bob-lee"
+            
+                # Build tables for the selected group (for display below the summary)
                 selected = [cand] + others
                 ath_df = cmp.build_athena_table(selected)
                 gen_df = cmp.build_gensos_table(selected)
-                
-                if ath_df.empty and gen_df.empty:
-                    st.warning("No Athena/Genos data found for the selected candidates.")
-                    st.stop()
-                    
-                # ---- Compare top: summary + editor (above tables) ----
-    
-                import re
-                import pandas as pd
-                
-                # ---- Compare top: summary + editor (above tables) ----
-                import pandas as pd
-                
-                other = others[0]
-                cand_label  = display_name(cand)
-                other_label = display_name(other)
-                
-                # 1) Keys FIRST
-                editor_key  = f"cmp-summary-text-{cand}-{other}"
-                open_key    = f"cmp-editor-open-{cand}-{other}"
-                pending_key = f"cmp-pending-gen-{cand}-{other}"
-                
-                # 2) Build df_agent from the two tables
-                parts = []
-                if ath_df is not None and not ath_df.empty:
-                    a = ath_df.drop(columns=["Top Performers"], errors="ignore").copy()
-                    a.insert(0, "Section", "Athena")
-                    parts.append(a)
-                if gen_df is not None and not gen_df.empty:
-                    g = gen_df.copy()
-                    g.insert(0, "Section", "Genos")
-                    parts.append(g)
-                df_agent = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
-                
-                # 3) Name map for pretty labels
-                name_map = {x: display_name(x) for x in ([cand] + others)}
-                
-                # 4) Normalize names inside the table used for prompting
-                df_agent_clean = _normalize_df_names(df_agent, name_map)  # <- requires helper defined once
-                
-                # 5) Load previously saved summary once
-                compare_blob = f"{_slug(cand)}_vs_{_slug(other)}_cohesive_summary.html"
-                if editor_key not in st.session_state:
-                    try:
-                        from send_back import load_summary_only
-                        loaded = load_summary_only(compare_blob) or ""
-                        # de-slug any old text
-                        st.session_state[editor_key] = _deslug_names(loaded, name_map)
-                        if loaded:
-                            st.info("Loaded existing comparison summary text.")
-                    except Exception:
-                        st.session_state[editor_key] = ""
-                
-                # 6) Ensure editor toggle exists
-                st.session_state.setdefault(open_key, False)
-                
-                # 7) If generation is pending, run it now (use pretty names + cleaned table)
+            
+                # Load summaries for summary-based comparison
+                cand_summary = data.get("summary", "") or ""
+                other_summaries = {display_name(o): preloaded.get(o, {}).get("summary", "") or "" for o in others}
+            
+                # State keys (now group-based, not pairwise)
+                editor_key  = f"cmp-summary-text-{cand}"
+                open_key    = f"cmp-editor-open-{cand}"
+                pending_key = f"cmp-pending-gen-{cand}"
+            
+                # Generate (on-demand)
                 if st.session_state.get(pending_key):
                     with st.spinner("Comparing and drafting summary…"):
                         out_text = compare_summaries_agent(
-                            cand=cand_label,
-                            other=other_label,
-                            df=df_agent_clean,
+                            cand_summary=cand_summary,
+                            other_summaries=other_summaries,
                         )
-                        st.session_state[editor_key] = _deslug_names(out_text or "", name_map)
+                        st.session_state[editor_key] = out_text or ""
                     st.session_state[pending_key] = False
                     st.session_state[open_key] = False
-                    st.toast("Draft generated — it’s displayed above the tables.", icon="📝")
-                
-                # 8) Summary UI (above tables)
+                    st.toast("Draft generated — it’s displayed above.", icon="📝")
+            
+                # --- Summary UI (above tables) ---
                 st.markdown("### Comparison summary")
-                
+            
                 if st.session_state.get(editor_key):
                     with st.container(border=True):
                         st.markdown(st.session_state[editor_key])
-                
+            
                     c1, c2, c3, c4, c5 = st.columns([1.2, 1.1, 1.6, 1.6, 1.6])
-                
+            
+                    # c1: edit/done
                     with c1:
-                        if not st.session_state[open_key]:
-                            if st.button("✏️ Edit summary", key=f"open-edit-{cand}-{other}"):
+                        if not st.session_state.get(open_key, False):
+                            if st.button("✏️ Edit summary", key=f"open-edit-{_slug(cand)}"):
                                 st.session_state[open_key] = True
                                 st.rerun()
                         else:
-                            if st.button("✅ Done editing", key=f"close-edit-{cand}-{other}"):
+                            if st.button("✅ Done editing", key=f"close-edit-{_slug(cand)}"):
                                 st.session_state[open_key] = False
                                 st.rerun()
-                
+            
+                    # c2: regenerate
                     with c2:
-                        if st.button("🔄 Regenerate", key=f"regen-{cand}-{other}"):
+                        if st.button("🔄 Regenerate", key=f"regen-{_slug(cand)}-{others_slug}"):
                             st.session_state[pending_key] = True
                             st.rerun()
-                
+            
+                    # c3: remove current & compared
                     with c3:
-                        if st.button("🗑️ Remove compared candidates", key=f"rm-compared-{_slug(cand)}"):
-                            if others:
-                                st.session_state[key_multi] = []  # clear selection to avoid default-not-in-options
-                                _remove_and_refresh(others)       # this calls st.rerun()
+                        if st.button("🗑️ Remove current & compared", key=f"rm-compared-{_slug(cand)}-{others_slug}"):
+                            to_remove = [cand] + (others or [])
+                            if to_remove:
+                                st.session_state[f"clear-{key_multi}"] = True
+                                _remove_and_refresh(to_remove)  # clears caches and reruns
                             else:
-                                st.toast("No other candidates selected.", icon="⚠️")
-                
+                                st.toast("Nothing selected to remove.", icon="⚠️")
+            
+                    # c4: save (archive to 'finished')
                     with c4:
-                        can_save = bool(st.session_state.get(editor_key, "").strip())
+                        can_save = bool((st.session_state.get(editor_key) or "").strip())
                         if st.button(
                             "💾 Save updated comparison",
-                            key=f"cmp-save-{_slug(cand)}-{_slug(other)}",
+                            key=f"cmp-save-{_slug(cand)}-{others_slug}",
                             use_container_width=True,
                             disabled=not can_save,
                             help="Save and archive to 'finished'",
                         ):
-                            html_doc = _build_compare_html(cand, other, st.session_state.get(editor_key, ""), ath_df, gen_df)
+                            html_doc = _build_compare_html(
+                                cand,
+                                others_title,  # show all others on the header
+                                st.session_state.get(editor_key, ""),
+                                ath_df,
+                                gen_df
+                            )
                             from send_back import render_comparison_download, _archive_cc
-                            render_comparison_download(cand, other, html_doc)
-                            st.session_state[f"last_cmp_html_{cand}_{other}"] = html_doc
+                            render_comparison_download(cand, others_title, html_doc)
+                            st.session_state[f"last_cmp_html_{cand}_{others_slug}"] = html_doc
                             try:
                                 from azure.storage.blob import ContentSettings
                                 cc = _archive_cc()
-                                cc.upload_blob(f"compare/{_slug(cand)}-vs-{_slug(other)}.html", html_doc.encode("utf-8"),
-                                               overwrite=True, content_settings=ContentSettings(content_type="text/html"))
-                                cc.upload_blob(f"{_slug(cand)}_vs_{_slug(other)}_cohesive_summary.html",
-                                               (st.session_state.get(editor_key, "") or "").encode("utf-8"),
-                                               overwrite=True, content_settings=ContentSettings(content_type="text/plain"))
+                                cc.upload_blob(
+                                    f"compare/{_slug(cand)}-vs-{others_slug}.html",
+                                    html_doc.encode("utf-8"),
+                                    overwrite=True,
+                                    content_settings=ContentSettings(content_type="text/html"),
+                                )
+                                cc.upload_blob(
+                                    f"{_slug(cand)}_vs_{others_slug}_cohesive_summary.txt",
+                                    (st.session_state.get(editor_key, "") or "").encode("utf-8"),
+                                    overwrite=True,
+                                    content_settings=ContentSettings(content_type="text/plain"),
+                                )
                                 st.toast("Saved and archived to ‘finished’.", icon="📦")
                             except Exception as e:
                                 st.warning(f"Saved, but archiving to 'finished' failed: {e}")
                             st.success("Saved comparison HTML.")
-                
+            
+                    # c5: download last saved
                     with c5:
-                        file_name = f"{_slug(cand)}-vs-{_slug(other)}.html"
-                        last_html = st.session_state.get(f"last_cmp_html_{cand}_{other}")
+                        file_name = f"{_slug(cand)}-vs-{others_slug}.html"
+                        last_html = st.session_state.get(f"last_cmp_html_{cand}_{others_slug}")
                         st.download_button(
                             "📄 Download last saved HTML",
-                            data=(last_html or _build_compare_html(cand, other, st.session_state.get(editor_key, ""), ath_df, gen_df)).encode("utf-8"),
-                            file_name=file_name, mime="text/html", use_container_width=True,
-                            key=f"dl-last-{_slug(cand)}-{_slug(other)}",
+                            data=(last_html or _build_compare_html(cand, others_title, st.session_state.get(editor_key, ""), ath_df, gen_df)).encode("utf-8"),
+                            file_name=file_name,
+                            mime="text/html",
+                            use_container_width=True,
+                            key=f"dl-last-{_slug(cand)}-{others_slug}",
                         )
-                
-                    if st.session_state[open_key]:
+            
+                    # Inline editor (when open)
+                    if st.session_state.get(open_key, False):
                         edited = st.text_area(
                             "Summary editor",
                             value=st.session_state.get(editor_key, ""),
-                            key=f"cmp-editor-ui-{cand}-{other}",
+                            key=f"cmp-editor-ui-{cand}-{others_slug}",
                             height=300,
                         )
                         st.session_state[editor_key] = edited
-                
+            
                 else:
-                    if st.button("✨ Generate comparison summary", key=f"gen-top-{cand}-{other}"):
+                    if st.button("✨ Generate comparison summary", key=f"gen-top-{_slug(cand)}"):
                         st.session_state[pending_key] = True
                         st.rerun()
-                
+            
                 st.divider()
-
+            
+                # ---- Tables AFTER the summary ----
+                if ath_df is not None and not ath_df.empty:
+                    st.markdown("### Athena scores")
+                    st.dataframe(ath_df, use_container_width=True)
+            
+                if gen_df is not None and not gen_df.empty:
+                    st.markdown("### Genos scores")
+                    st.dataframe(gen_df, use_container_width=True)
 
                 
 
@@ -836,23 +1033,8 @@ else:
                     st.markdown("### Genos scores")
                     st.dataframe(gen_df, use_container_width=True)
                 
-               
-            try:
-                csvs = list_csvs_for_candidate(cand)
-            except Exception as e:
-                st.error(f"Failed to list CSVs for {cand}: {e}")
-                continue
-
             if not csvs:
                 st.write("_No CSVs found for this candidate._")
-                continue
-
-            for path in csvs:
-                df = load_csv(path)
-    
-            athena_path = next((p for p in csvs if "athena" in p.lower()), None)
-            athena_df = load_csv(athena_path) if athena_path else None
-            # Combined editor for the current candidate vs. the first selected "other"
 
             def _col(df, target: str):
                 if df is None:
