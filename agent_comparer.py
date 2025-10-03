@@ -1,50 +1,50 @@
-# agent_comparer.py
 from typing import Optional
 import os
-from openai import OpenAI
-# OPTIONAL: choose OpenAI or Azure OpenAI at runtime
+from openai import AzureOpenAI
 
-MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4o-mini")  # change as needed
+client = AzureOpenAI(
+    api_key=os.environ["OPENAI_API_KEY"],
+    api_version="2024-08-01-preview",
+    azure_endpoint="https://forhr.openai.azure.com/"
+)
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+def _build_summary_prompt(cand_summary: str, other_summaries: dict[str, str]) -> str:
+    others_text = "\n\n".join(
+        f"--- {name} ---\n{summary}" for name, summary in other_summaries.items()
+    )
+    return f"""
+You are a precise hiring brief writer.
 
-def _build_agent_prompt(cand: str, other: str, df) -> str:
-    """Builds a grounded prompt using the comparison table for the candidates."""
-    table_md = ""
-    table_md = df.to_markdown(index=False)
+Task: Compare the current candidate's summary with the others in no more than 500 words.
 
-
-    return f"""You are a precise hiring brief writer.
-
-Task: Using the comparison table below, write a cohesive recruiter-ready summary
-comparing **{cand}** and **{other}**. Base your summary **only on the facts** from
-the table — do **not** invent statistics, percentages, or claims not present.
-
-Comparison table (primary source of truth):
+Current Candidate:
 ---
-{table_md}
+{cand_summary}
+---
+
+Other candidates:
+---
+{others_text}
 ---
 
 Output format:
-- 1 concise paragraph summarizing the differences and strengths.
-- 3–5 bullet points highlighting key factual takeaways.
-- If any GENOS traits are low/very low or Athena mismatches exist, highlight them explicitly.
-- Include 2–3 targeted interview questions that help decide between the candidates.
+- 1 cohesive paragraph summarizing differences.
+- 3–5 factual bullet points.
+- 2–3 targeted interview questions.
 """
 
 def compare_summaries_agent(
-    cand: str,
-    other: str,
-    df,
+    cand_summary: str,
+    other_summaries: dict[str, str],
     *,
     model: Optional[str] = None,
 ) -> str:
-    """Entry point called by candidates.py."""
-    prompt = _build_agent_prompt(cand, other, df)
+    """Compare one candidate’s summary against multiple others."""
+    prompt = _build_summary_prompt(cand_summary, other_summaries)
     if client is None:
         return "(Agent not configured)"
 
-    model = model or MODEL_NAME
+    model = model or "gpt-4"
 
     try:
         resp = client.chat.completions.create(
