@@ -15,24 +15,32 @@ def _build_summary_prompt(cand_summary: str, other_summaries: dict[str, str]) ->
     return f"""
 You are a precise hiring brief writer.
 
-Task: Compare the current candidate's summary with the others' applying for the same role, focusing specifically on "People Orientation + Tolerance; Decision-making + Ability to Notice; Dealing with Difficult Situations + Tolerance; Trainability + Role ID / Receptiveness to Change."
+Task: Compare {cand_name}'s summary with the other candidates applying for the same role. Focus specifically on the following capability pairings:
+- People Orientation + Tolerance
+- Decision-making + Ability to Notice
+- Dealing with Difficult Situations + Tolerance
+- Trainability + Role ID / Receptiveness to Change
 
-Mention any other 'leg ups' that either candidate may have over the other. Do not refer to the current candidate as 'current candidate', use their name. 
+Instructions:
+- If {cand_name} is stronger or weaker than another candidate in any area, state this clearly with evidence.
+- Mention any additional 'leg ups' either candidate may have.
+- Write in a professional, manager-friendly tone.
 
-Current Candidate:
+Inputs:
+Current Candidate ({cand_name}):
 ---
 {cand_summary}
 ---
 
-Other candidates:
+Other Candidates:
 ---
 {others_text}
 ---
 
 Output format:
-- 1 cohesive paragraph summarizing differences.
-- 3–5 factual bullet points.
-- 2–3 targeted interview questions.
+1. **Narrative Comparison**: A cohesive paragraph summarizing relative strengths, risks, and fit.
+2. **Factual Highlights**: 3–5 concise bullet points with specific comparisons (trait vs trait).
+3. **Interview Probes**: 2–3 targeted interview questions for each candidate, focusing on areas of uncertainty, contradictions, or critical gaps.
 """
 
 def compare_summaries_agent(
