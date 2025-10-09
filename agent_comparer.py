@@ -15,9 +15,9 @@ def _build_summary_prompt(cand_summary: str, other_summaries: dict[str, str]) ->
     return f"""
 You are a precise hiring brief writer.
 
-Task: Compare the current candidate's summary with the others, focusing specifically on "People Orientation + Tolerance; Decision-making + Ability to Notice; Dealing with Difficult Situations + Tolerance; Trainability + Role ID / Receptiveness to Change."
+Task: Compare the current candidate's summary with the others' applying for the same role, focusing specifically on "People Orientation + Tolerance; Decision-making + Ability to Notice; Dealing with Difficult Situations + Tolerance; Trainability + Role ID / Receptiveness to Change."
 
-Mention any other 'leg ups' that either candidate may have over the other. 
+Mention any other 'leg ups' that either candidate may have over the other. Do not refer to the current candidate as 'current candidate', use their name. 
 
 Current Candidate:
 ---
