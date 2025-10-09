@@ -15,7 +15,9 @@ def _build_summary_prompt(cand_summary: str, other_summaries: dict[str, str]) ->
     return f"""
 You are a precise hiring brief writer.
 
-Task: Compare the current candidate's summary with the others in no more than 500 words.
+Task: Compare the current candidate's summary with the others, focusing specifically on "People Orientation + Tolerance; Decision-making + Ability to Notice; Dealing with Difficult Situations + Tolerance; Trainability + Role ID / Receptiveness to Change."
+
+Mention any other 'leg ups' that either candidate may have over the other. 
 
 Current Candidate:
 ---
