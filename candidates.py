@@ -318,12 +318,12 @@ def _build_solo_html(
 
     if ath_df is not None and not ath_df.empty:
         parts.append(
-            "<h3 style='margin:20px 0 8px'>Athena scores</h3>"
+            "<h3 style='margin:20px 0 8px'>Athena Scores</h3>"
             + ath_df.to_html(index=False, border=1, justify='left', escape=False)
         )
     if gen_df is not None and not gen_df.empty:
         parts.append(
-            "<h3 style='margin:20px 0 8px'>Genos bands</h3>"
+            "<h3 style='margin:20px 0 8px'>Genos Scores</h3>"
             + gen_df.to_html(index=False, border=1, justify='left', escape=False)
         )
         # Reuse the same legend you showed in Solo
